@@ -1,9 +1,10 @@
 import { randomBytes } from "node:crypto";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, existsSync, statSync } from "node:fs";
 import path from "node:path";
 import { Router } from "express";
 import multer from "multer";
-import { HttpProblem, notImplemented } from "../lib/problem.js";
+import { HttpProblem } from "../lib/problem.js";
+import { stagedUploads } from "../lib/upload-staging.js";
 
 export const uploadsRouter = Router();
 
@@ -79,15 +80,87 @@ function wrapMulter(handler: ReturnType<typeof uploadMiddleware.single>) {
   };
 }
 
-// Stub handler — downstream engineer wires persistence.
+// CUID-ish id generator for the attachment staging map. We deliberately don't
+// use Prisma's cuid helper here because the staged row is not yet a DB row —
+// this is just a client-visible handle.
+function generateAttachmentId(): string {
+  return `att_${randomBytes(12).toString("hex")}`;
+}
+
+// POST /uploads — store file, stage metadata until the bill that will own it
+// is created (§6.5.3). Response shape per §6.5.4.
 uploadsRouter.post(
   "/uploads",
   wrapMulter(uploadMiddleware.single("file")),
-  (_req, _res, next) => {
-    next(notImplemented("POST /uploads is not implemented yet."));
+  (req, res, next) => {
+    try {
+      const file = req.file;
+      if (!file) {
+        throw new HttpProblem({
+          status: 400,
+          code: "VALIDATION_ERROR",
+          title: "Invalid request body",
+          detail: "Expected a multipart/form-data request with field 'file'.",
+          fieldIssues: [{ path: "file", message: "Required" }],
+        });
+      }
+      const id = generateAttachmentId();
+      stagedUploads.set(id, {
+        id,
+        originalFilename: file.originalname,
+        storedFilename: file.filename,
+        mimeType: file.mimetype,
+        sizeBytes: file.size,
+        uploadedByUserId: req.user!.id,
+        uploadedAt: new Date(),
+      });
+      res.status(201).json({
+        attachment_id: id,
+        original_filename: file.originalname,
+        stored_filename: file.filename,
+        mime_type: file.mimetype,
+        size_bytes: file.size,
+      });
+    } catch (err) {
+      next(err);
+    }
   },
 );
 
-uploadsRouter.get("/uploads/:stored_filename", (_req, _res, next) => {
-  next(notImplemented("GET /uploads/:stored_filename is not implemented yet."));
+// GET /uploads/:stored_filename — serve the binary with the correct MIME
+// based on the extension. 404 if missing. Any active user may read (§4.6).
+uploadsRouter.get("/uploads/:stored_filename", (req, res, next) => {
+  try {
+    const raw = req.params.stored_filename;
+    // Guard against path traversal; only accept the exact file name.
+    if (raw.includes("/") || raw.includes("..") || raw.includes("\\")) {
+      throw new HttpProblem({
+        status: 404,
+        code: "NOT_FOUND",
+        title: "Not found",
+        detail: "Upload not found.",
+      });
+    }
+    const full = path.join(UPLOAD_DIR, raw);
+    if (!existsSync(full) || !statSync(full).isFile()) {
+      throw new HttpProblem({
+        status: 404,
+        code: "NOT_FOUND",
+        title: "Not found",
+        detail: "Upload not found.",
+      });
+    }
+    const ext = path.extname(raw).toLowerCase();
+    const mime =
+      ext === ".pdf"
+        ? "application/pdf"
+        : ext === ".png"
+          ? "image/png"
+          : ext === ".jpg" || ext === ".jpeg"
+            ? "image/jpeg"
+            : "application/octet-stream";
+    res.type(mime).sendFile(full);
+  } catch (err) {
+    next(err);
+  }
 });

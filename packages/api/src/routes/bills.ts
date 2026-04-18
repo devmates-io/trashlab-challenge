@@ -1,45 +1,181 @@
 import { Router } from "express";
-import { notImplemented } from "../lib/problem.js";
+import {
+  billCreateRequestSchema,
+  billListQuerySchema,
+  billPatchRequestSchema,
+} from "@bill-pay/shared";
+import { prisma } from "../db.js";
+import { HttpProblem } from "../lib/problem.js";
+import { validate } from "../middleware/validate.js";
+import {
+  billDetailInclude,
+  billDetailToDto,
+  billSummaryToDto,
+} from "../lib/dto.js";
+import {
+  approveBillT5T6,
+  cloneBill,
+  createBill,
+  deleteBill,
+  editBill,
+  payBill,
+  recallBill,
+  submitBill,
+} from "../services/bill-state.js";
 
-// §6.5.3 — bills endpoints (CRUD + state transitions T1–T10).
 export const billsRouter = Router();
 
-billsRouter.get("/bills", (_req, _res, next) => {
-  next(notImplemented("GET /bills is not implemented yet."));
+// GET /bills — list, sorted by due_date asc, optional ?status= filter.
+billsRouter.get(
+  "/bills",
+  validate(billListQuerySchema, "query"),
+  async (req, res, next) => {
+    try {
+      const { status } = req.query as unknown as { status?: string };
+      const rows = await prisma.bill.findMany({
+        where: status ? { status: status as never } : undefined,
+        orderBy: { dueDate: "asc" },
+        include: {
+          vendor: { select: { name: true } },
+          creator: { select: { name: true } },
+          approvals: { select: { status: true } },
+          attachment: { select: { id: true } },
+        },
+      });
+      res.json(rows.map(billSummaryToDto));
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+// POST /bills — T1 create draft.
+billsRouter.post(
+  "/bills",
+  validate(billCreateRequestSchema),
+  async (req, res, next) => {
+    try {
+      const body = req.body as typeof billCreateRequestSchema._output;
+      const bill = await createBill(req.user!, {
+        vendor_id: body.vendor_id,
+        invoice_number: body.invoice_number,
+        amount_cents: body.amount_cents,
+        issue_date: body.issue_date,
+        due_date: body.due_date,
+        line_items: body.line_items,
+        attachment_id: body.attachment_id ?? null,
+      });
+      res.status(201).json(billDetailToDto(bill));
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+// GET /bills/:id — full BillDetailDTO.
+billsRouter.get("/bills/:id", async (req, res, next) => {
+  try {
+    const bill = await prisma.bill.findUnique({
+      where: { id: req.params.id },
+      include: billDetailInclude,
+    });
+    if (!bill) {
+      throw new HttpProblem({
+        status: 404,
+        code: "NOT_FOUND",
+        title: "Bill not found",
+        detail: "No bill with that id.",
+      });
+    }
+    res.json(billDetailToDto(bill));
+  } catch (err) {
+    next(err);
+  }
 });
 
-billsRouter.post("/bills", (_req, _res, next) => {
-  next(notImplemented("POST /bills is not implemented yet."));
+// PATCH /bills/:id — T2 edit draft.
+billsRouter.patch(
+  "/bills/:id",
+  validate(billPatchRequestSchema),
+  async (req, res, next) => {
+    try {
+      const body = req.body as typeof billPatchRequestSchema._output;
+      const bill = await editBill(req.user!, req.params.id, {
+        vendor_id: body.vendor_id,
+        invoice_number: body.invoice_number,
+        amount_cents: body.amount_cents,
+        issue_date: body.issue_date,
+        due_date: body.due_date,
+        line_items: body.line_items,
+        attachment_id: body.attachment_id,
+      });
+      res.json(billDetailToDto(bill));
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+// DELETE /bills/:id — T3 delete draft.
+billsRouter.delete("/bills/:id", async (req, res, next) => {
+  try {
+    await deleteBill(req.user!, req.params.id);
+    res.status(204).end();
+  } catch (err) {
+    next(err);
+  }
 });
 
-billsRouter.get("/bills/:id", (_req, _res, next) => {
-  next(notImplemented("GET /bills/:id is not implemented yet."));
+// POST /bills/:id/submit — T4.
+billsRouter.post("/bills/:id/submit", async (req, res, next) => {
+  try {
+    const bill = await submitBill(req.user!, req.params.id);
+    res.json(billDetailToDto(bill));
+  } catch (err) {
+    next(err);
+  }
 });
 
-billsRouter.patch("/bills/:id", (_req, _res, next) => {
-  next(notImplemented("PATCH /bills/:id is not implemented yet."));
+// POST /bills/:id/approve — T5/T6 (one-click decides all eligible slots).
+billsRouter.post("/bills/:id/approve", async (req, res, next) => {
+  try {
+    const bill = await approveBillT5T6(req.user!, req.params.id);
+    res.json(billDetailToDto(bill));
+  } catch (err) {
+    next(err);
+  }
 });
 
-billsRouter.delete("/bills/:id", (_req, _res, next) => {
-  next(notImplemented("DELETE /bills/:id is not implemented yet."));
+// POST /bills/:id/recall — T8.
+billsRouter.post("/bills/:id/recall", async (req, res, next) => {
+  try {
+    const bill = await recallBill(req.user!, req.params.id);
+    res.json(billDetailToDto(bill));
+  } catch (err) {
+    next(err);
+  }
 });
 
-billsRouter.post("/bills/:id/submit", (_req, _res, next) => {
-  next(notImplemented("POST /bills/:id/submit is not implemented yet."));
+// POST /bills/:id/pay — T9. Idempotency-Key header makes repeat calls return
+// the same Payment (§6.5.4).
+billsRouter.post("/bills/:id/pay", async (req, res, next) => {
+  try {
+    const rawKey = req.header("Idempotency-Key");
+    const idemKey =
+      typeof rawKey === "string" && rawKey.trim() !== "" ? rawKey.trim() : null;
+    const bill = await payBill(req.user!, req.params.id, idemKey);
+    res.json(billDetailToDto(bill));
+  } catch (err) {
+    next(err);
+  }
 });
 
-billsRouter.post("/bills/:id/approve", (_req, _res, next) => {
-  next(notImplemented("POST /bills/:id/approve is not implemented yet."));
-});
-
-billsRouter.post("/bills/:id/recall", (_req, _res, next) => {
-  next(notImplemented("POST /bills/:id/recall is not implemented yet."));
-});
-
-billsRouter.post("/bills/:id/pay", (_req, _res, next) => {
-  next(notImplemented("POST /bills/:id/pay is not implemented yet."));
-});
-
-billsRouter.post("/bills/:id/clone", (_req, _res, next) => {
-  next(notImplemented("POST /bills/:id/clone is not implemented yet."));
+// POST /bills/:id/clone — T10 (only rejected bills are cloneable).
+billsRouter.post("/bills/:id/clone", async (req, res, next) => {
+  try {
+    const bill = await cloneBill(req.user!, req.params.id);
+    res.status(201).json(billDetailToDto(bill));
+  } catch (err) {
+    next(err);
+  }
 });
