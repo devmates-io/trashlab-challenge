@@ -1,0 +1,69 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: billpay
+    ports:
+      - "5432:5432"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d billpay"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: packages/api/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:postgres@db:5432/billpay}
+      # API_PORT inside the container is always 4000; the host mapping below
+      # is what O-R1 lets the reviewer override.
+      API_PORT: "4000"
+      UPLOAD_DIR: ${UPLOAD_DIR:-/app/uploads}
+      SEED_ON_EMPTY: ${SEED_ON_EMPTY:-true}
+      NODE_ENV: development
+    ports:
+      - "${API_PORT:-4000}:4000"
+    volumes:
+      # Bind mounts for hot-reload during development. Anonymous volumes on
+      # node_modules keep the host and container trees independent.
+      - ./packages/api:/app/packages/api
+      - ./packages/shared:/app/packages/shared
+      - /app/node_modules
+      - /app/packages/api/node_modules
+      - /app/packages/shared/node_modules
+      - uploads:/app/uploads
+
+  web:
+    build:
+      context: .
+      dockerfile: packages/web/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - api
+    environment:
+      VITE_API_URL: ${VITE_API_URL:-http://localhost:4000}
+      # Web dev server inside the container is pinned to 3000 (the vite dev
+      # script hardcodes --port 3000). Host port override is below.
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+    volumes:
+      - ./packages/web:/app/packages/web
+      - ./packages/shared:/app/packages/shared
+      - /app/node_modules
+      - /app/packages/web/node_modules
+      - /app/packages/shared/node_modules
+
+volumes:
+  db_data:
+  uploads:

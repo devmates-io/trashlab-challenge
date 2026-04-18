@@ -1,0 +1,256 @@
+// Bill Pay MVP — Prisma schema.
+// Authoritative reference: §6.2 of docs/specs/bill-pay-mvp.md.
+//
+// Conventions:
+// - Column names are snake_case (matching wire contract §6.5.1).
+// - Model field names are camelCase (idiomatic TS) with @map for the DB name.
+// - All IDs are CUIDs. All monetary values are Int (integer cents, USD).
+// - All timestamps are DateTime, stored as UTC.
+
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums — §6.2.2
+// ---------------------------------------------------------------------------
+
+enum UserRole {
+  submitter
+  approver
+  admin
+}
+
+enum PaymentMethod {
+  ach
+  check
+  wire
+  card
+}
+
+enum BillStatus {
+  draft
+  pending_approval
+  approved
+  paid
+  rejected
+}
+
+enum ApprovalStatus {
+  pending
+  approved
+  rejected
+  cancelled
+}
+
+enum PaymentStatus {
+  completed
+}
+
+enum BillEventType {
+  created
+  submitted
+  approved
+  rejected
+  recalled
+  paid
+  edited
+}
+
+// ---------------------------------------------------------------------------
+// User — §6.2.3
+// ---------------------------------------------------------------------------
+
+model User {
+  id                      String   @id @default(cuid())
+  name                    String
+  email                   String?  @unique
+  role                    UserRole
+  maxApprovalAmountCents  Int      @default(0) @map("max_approval_amount_cents")
+  isActive                Boolean  @default(true) @map("is_active")
+  createdAt               DateTime @default(now()) @map("created_at")
+  updatedAt               DateTime @updatedAt @map("updated_at")
+
+  billsCreated        Bill[]         @relation("BillCreator")
+  approvalsDecided    BillApproval[] @relation("ApprovalDecider")
+  paymentsInitiated   Payment[]      @relation("PaymentInitiator")
+  billEventsActor     BillEvent[]    @relation("BillEventActor")
+  attachmentsUploaded Attachment[]   @relation("AttachmentUploader")
+
+  @@map("users")
+}
+
+// ---------------------------------------------------------------------------
+// Vendor — §6.2.3
+// ---------------------------------------------------------------------------
+
+model Vendor {
+  id             String        @id @default(cuid())
+  name           String
+  contactEmail   String?       @map("contact_email")
+  paymentMethod  PaymentMethod @map("payment_method")
+  paymentDetails Json          @map("payment_details")
+  isActive       Boolean       @default(true) @map("is_active")
+  createdAt      DateTime      @default(now()) @map("created_at")
+  updatedAt      DateTime      @updatedAt @map("updated_at")
+
+  bills Bill[]
+
+  @@map("vendors")
+}
+
+// ---------------------------------------------------------------------------
+// Bill — §6.2.3
+// ---------------------------------------------------------------------------
+
+model Bill {
+  id                String     @id @default(cuid())
+  vendorId          String     @map("vendor_id")
+  invoiceNumber     String     @map("invoice_number")
+  amountCents       Int        @map("amount_cents")
+  issueDate         DateTime   @map("issue_date") @db.Date
+  dueDate           DateTime   @map("due_date") @db.Date
+  status            BillStatus @default(draft)
+  rejectionReason   String?    @map("rejection_reason")
+  createdByUserId   String     @map("created_by_user_id")
+  submittedAt       DateTime?  @map("submitted_at")
+  createdAt         DateTime   @default(now()) @map("created_at")
+  updatedAt         DateTime   @updatedAt @map("updated_at")
+
+  vendor      Vendor         @relation(fields: [vendorId], references: [id], onDelete: Restrict)
+  creator     User           @relation("BillCreator", fields: [createdByUserId], references: [id], onDelete: Restrict)
+  lineItems   BillLineItem[]
+  attachment  Attachment?
+  approvals   BillApproval[]
+  payment     Payment?
+  events      BillEvent[]
+
+  @@index([status, dueDate], map: "bills_status_due_date_idx")
+  @@index([createdByUserId], map: "bills_created_by_user_id_idx")
+  @@index([vendorId], map: "bills_vendor_id_idx")
+  @@map("bills")
+}
+
+// ---------------------------------------------------------------------------
+// BillLineItem — §6.2.3
+// ---------------------------------------------------------------------------
+
+model BillLineItem {
+  id          String   @id @default(cuid())
+  billId      String   @map("bill_id")
+  description String
+  amountCents Int      @map("amount_cents")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  bill Bill @relation(fields: [billId], references: [id], onDelete: Cascade)
+
+  @@map("bill_line_items")
+}
+
+// ---------------------------------------------------------------------------
+// Attachment — §6.2.3
+// ---------------------------------------------------------------------------
+
+model Attachment {
+  id                String   @id @default(cuid())
+  billId            String   @unique @map("bill_id")
+  originalFilename  String   @map("original_filename")
+  storedFilename    String   @unique @map("stored_filename")
+  mimeType          String   @map("mime_type")
+  sizeBytes         Int      @map("size_bytes")
+  uploadedByUserId  String   @map("uploaded_by_user_id")
+  uploadedAt        DateTime @default(now()) @map("uploaded_at")
+
+  bill      Bill @relation(fields: [billId], references: [id], onDelete: Cascade)
+  uploader  User @relation("AttachmentUploader", fields: [uploadedByUserId], references: [id], onDelete: Restrict)
+
+  @@map("attachments")
+}
+
+// ---------------------------------------------------------------------------
+// ApprovalRule — §6.2.3
+// ---------------------------------------------------------------------------
+
+model ApprovalRule {
+  id                String   @id @default(cuid())
+  name              String
+  minAmountCents    Int      @default(0) @map("min_amount_cents")
+  approverUserIds   String[] @map("approver_user_ids")
+  isActive          Boolean  @default(true) @map("is_active")
+  createdAt         DateTime @default(now()) @map("created_at")
+  updatedAt         DateTime @updatedAt @map("updated_at")
+
+  approvals BillApproval[]
+
+  @@map("approval_rules")
+}
+
+// ---------------------------------------------------------------------------
+// BillApproval — §6.2.3
+// ---------------------------------------------------------------------------
+
+model BillApproval {
+  id                        String         @id @default(cuid())
+  billId                    String         @map("bill_id")
+  ruleId                    String         @map("rule_id")
+  ruleNameSnapshot          String         @map("rule_name_snapshot")
+  eligibleApproverUserIds   String[]       @map("eligible_approver_user_ids")
+  status                    ApprovalStatus @default(pending)
+  decidedByUserId           String?        @map("decided_by_user_id")
+  decidedAt                 DateTime?      @map("decided_at")
+  rejectionReason           String?        @map("rejection_reason")
+  createdAt                 DateTime       @default(now()) @map("created_at")
+
+  bill     Bill         @relation(fields: [billId], references: [id], onDelete: Cascade)
+  rule     ApprovalRule @relation(fields: [ruleId], references: [id], onDelete: Restrict)
+  decider  User?        @relation("ApprovalDecider", fields: [decidedByUserId], references: [id], onDelete: Restrict)
+
+  @@index([billId, status], map: "bill_approvals_bill_id_status_idx")
+  @@map("bill_approvals")
+}
+
+// ---------------------------------------------------------------------------
+// Payment — §6.2.3
+// ---------------------------------------------------------------------------
+
+model Payment {
+  id                        String        @id @default(cuid())
+  billId                    String        @unique @map("bill_id")
+  amountCents               Int           @map("amount_cents")
+  paymentMethod             PaymentMethod @map("payment_method")
+  paymentDetailsSnapshot    Json          @map("payment_details_snapshot")
+  status                    PaymentStatus @default(completed)
+  mockReference             String        @map("mock_reference")
+  initiatedByUserId         String        @map("initiated_by_user_id")
+  initiatedAt               DateTime      @default(now()) @map("initiated_at")
+
+  bill      Bill @relation(fields: [billId], references: [id], onDelete: Restrict)
+  initiator User @relation("PaymentInitiator", fields: [initiatedByUserId], references: [id], onDelete: Restrict)
+
+  @@map("payments")
+}
+
+// ---------------------------------------------------------------------------
+// BillEvent — §6.2.3
+// ---------------------------------------------------------------------------
+
+model BillEvent {
+  id           String        @id @default(cuid())
+  billId       String        @map("bill_id")
+  eventType    BillEventType @map("event_type")
+  actorUserId  String        @map("actor_user_id")
+  occurredAt   DateTime      @default(now()) @map("occurred_at")
+  payload      Json          @default("{}")
+
+  bill  Bill @relation(fields: [billId], references: [id], onDelete: Cascade)
+  actor User @relation("BillEventActor", fields: [actorUserId], references: [id], onDelete: Restrict)
+
+  @@index([billId, occurredAt(sort: Desc)], map: "bill_events_bill_id_occurred_at_idx")
+  @@map("bill_events")
+}

@@ -1,0 +1,19 @@
+{
+  "name": "bill-pay-mvp",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Bill Pay MVP — monorepo root. See docs/specs/bill-pay-mvp.md.",
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "pnpm@9.15.0",
+  "scripts": {
+    "dev": "pnpm --parallel --filter \"@bill-pay/api\" --filter \"@bill-pay/web\" dev",
+    "build": "pnpm -r --filter \"@bill-pay/*\" build",
+    "db:migrate": "pnpm --filter @bill-pay/api db:migrate",
+    "db:seed": "pnpm --filter @bill-pay/api db:seed",
+    "db:reset": "pnpm --filter @bill-pay/api db:reset",
+    "lint": "pnpm -r --if-present lint",
+    "typecheck": "pnpm -r --if-present typecheck"
+  }
+}
