@@ -25,6 +25,7 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ApiError, type FieldIssue } from "@/lib/api";
+import { formatMoney } from "@/lib/format";
 import {
   useCreateApprovalRule,
   usePatchApprovalRule,
@@ -310,7 +311,7 @@ function ApproverChecklist({
             >
               <span>{u.name}</span>
               <span className="text-xs text-muted-foreground">
-                limit ${(u.max_approval_amount_cents / 100).toLocaleString()}
+                limit {formatMoney(u.max_approval_amount_cents)}
               </span>
             </label>
           </li>

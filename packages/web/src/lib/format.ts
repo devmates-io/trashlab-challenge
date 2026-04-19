@@ -13,14 +13,28 @@ export function formatMoney(cents: number): string {
   return moneyFormatter.format(cents / 100);
 }
 
+// Date-only ISO strings (`YYYY-MM-DD`) must not be coerced through UTC —
+// `new Date("2026-04-04")` parses as midnight UTC, which in any negative
+// UTC offset shifts to the previous calendar day. Detect the date-only
+// shape and construct a local-midnight Date instead so `formatDate` always
+// returns the same calendar day the backend stored.
+const dateOnlyRegex = /^\d{4}-\d{2}-\d{2}$/;
+
+function toLocalDate(d: Date | string): Date {
+  if (typeof d !== "string") return d;
+  if (dateOnlyRegex.test(d)) {
+    const [y, m, day] = d.split("-").map(Number);
+    return new Date(y, m - 1, day);
+  }
+  return new Date(d);
+}
+
 export function formatDate(d: Date | string): string {
-  const date = typeof d === "string" ? new Date(d) : d;
-  return format(date, "MMM d, yyyy");
+  return format(toLocalDate(d), "MMM d, yyyy");
 }
 
 export function formatDateTime(d: Date | string): string {
-  const date = typeof d === "string" ? new Date(d) : d;
-  return format(date, "MMM d, yyyy · h:mm a");
+  return format(toLocalDate(d), "MMM d, yyyy · h:mm a");
 }
 
 // §6.7.3 — estimated settlement date by method.

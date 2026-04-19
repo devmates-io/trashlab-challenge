@@ -51,6 +51,17 @@ export function RulesTable({
   );
   const list = rules ?? [];
 
+  if (list.length === 0) {
+    return (
+      <div className="flex flex-col items-center gap-2 rounded-md border bg-card p-10 text-center">
+        <p className="text-sm text-muted-foreground">
+          No approval rules yet. The system needs at least one default rule to
+          route bills for approval.
+        </p>
+      </div>
+    );
+  }
+
   return (
     <div className="rounded-md border bg-card">
       <Table>
