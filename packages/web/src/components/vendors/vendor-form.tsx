@@ -5,7 +5,9 @@ import { z } from "zod";
 import { Loader2 } from "lucide-react";
 import {
   achPaymentDetailsSchema,
+  cardPaymentDetailsSchema,
   checkPaymentDetailsSchema,
+  PAYMENT_METHOD_VALUES,
   wirePaymentDetailsSchema,
   type VendorCreateRequest,
   type VendorDTO,
@@ -30,15 +32,17 @@ import {
 } from "@/components/ui/select";
 import { toastApiError } from "@/components/vendors/shared";
 
-// §6.6.8 — Payment method Select only shows ACH / Check / Wire. Card is
-// hidden per §6.2.6 (seed-only vendors).
-const FORM_PAYMENT_METHODS = ["ach", "check", "wire"] as const;
+// §6.6.8 — Payment method Select offers all four first-class methods
+// (ACH / Check / Wire / Card) per §6.2.6. The shared enum tuple is the
+// single source of truth; reusing it here prevents the form from drifting.
+const FORM_PAYMENT_METHODS = PAYMENT_METHOD_VALUES;
 type FormPaymentMethod = (typeof FORM_PAYMENT_METHODS)[number];
 
 const formPaymentDetailsSchema = z.discriminatedUnion("method", [
   achPaymentDetailsSchema,
   checkPaymentDetailsSchema,
   wirePaymentDetailsSchema,
+  cardPaymentDetailsSchema,
 ]);
 
 // Empty-string ↔ absent contact_email. RHF needs a concrete string default,
@@ -93,16 +97,22 @@ const DEFAULT_WIRE: VendorFormValues["payment_details"] = {
   iban: "",
   account_holder_name: "",
 };
+// Card brand defaults to "visa" because the shadcn Select below requires a
+// concrete value; the reviewer can change it before submit.
+const DEFAULT_CARD: VendorFormValues["payment_details"] = {
+  method: "card",
+  card_brand: "visa",
+  last_four: "",
+};
 
 function defaultsFor(method: FormPaymentMethod): VendorFormValues["payment_details"] {
   if (method === "ach") return { ...DEFAULT_ACH };
   if (method === "check") return { ...DEFAULT_CHECK };
-  return { ...DEFAULT_WIRE };
+  if (method === "wire") return { ...DEFAULT_WIRE };
+  return { ...DEFAULT_CARD };
 }
 
-// Map an optional existing VendorDTO (edit mode) to form values. If the
-// existing vendor uses the seed-only "card" method, we default the form to
-// "ach" since the form cannot represent card shape (§6.2.6).
+// Map an optional existing VendorDTO (edit mode) to form values.
 function toFormValues(initial?: VendorDTO): VendorFormValues {
   if (!initial) {
     return {
@@ -112,12 +122,9 @@ function toFormValues(initial?: VendorDTO): VendorFormValues {
       payment_details: { ...DEFAULT_ACH },
     };
   }
-  const method: FormPaymentMethod =
-    initial.payment_method === "card" ? "ach" : initial.payment_method;
+  const method: FormPaymentMethod = initial.payment_method;
   let payment_details: VendorFormValues["payment_details"];
-  if (initial.payment_method !== method) {
-    payment_details = defaultsFor(method);
-  } else if (initial.payment_details.method === "ach") {
+  if (initial.payment_details.method === "ach") {
     payment_details = {
       method: "ach",
       routing_number: initial.payment_details.routing_number,
@@ -140,6 +147,12 @@ function toFormValues(initial?: VendorDTO): VendorFormValues {
       swift_code: initial.payment_details.swift_code,
       iban: initial.payment_details.iban,
       account_holder_name: initial.payment_details.account_holder_name,
+    };
+  } else if (initial.payment_details.method === "card") {
+    payment_details = {
+      method: "card",
+      card_brand: initial.payment_details.card_brand,
+      last_four: initial.payment_details.last_four,
     };
   } else {
     payment_details = defaultsFor(method);
@@ -398,6 +411,64 @@ function WireSubform({ form }: SubformProps) {
   );
 }
 
+// Card-brand lowercase values match the zod enum; labels are capitalized
+// for display.
+const CARD_BRAND_OPTIONS = [
+  { value: "visa", label: "Visa" },
+  { value: "mastercard", label: "Mastercard" },
+  { value: "amex", label: "Amex" },
+  { value: "discover", label: "Discover" },
+] as const;
+
+function CardSubform({ form }: SubformProps) {
+  return (
+    <div className="grid gap-4">
+      <FormField
+        control={form.control}
+        name="payment_details.card_brand"
+        render={({ field }) => (
+          <FormItem>
+            <FormLabel>Card brand</FormLabel>
+            <Select value={field.value} onValueChange={field.onChange}>
+              <FormControl>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+              </FormControl>
+              <SelectContent>
+                {CARD_BRAND_OPTIONS.map((opt) => (
+                  <SelectItem key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <FormMessage />
+          </FormItem>
+        )}
+      />
+      <FormField
+        control={form.control}
+        name="payment_details.last_four"
+        render={({ field }) => (
+          <FormItem>
+            <FormLabel>Last four</FormLabel>
+            <FormControl>
+              <Input
+                inputMode="numeric"
+                maxLength={4}
+                placeholder="4 digits"
+                {...field}
+              />
+            </FormControl>
+            <FormMessage />
+          </FormItem>
+        )}
+      />
+    </div>
+  );
+}
+
 // ---- main component ----
 
 type VendorFormProps = {
@@ -539,6 +610,7 @@ export function VendorForm({
                       <SelectItem value="ach">ACH</SelectItem>
                       <SelectItem value="check">Check</SelectItem>
                       <SelectItem value="wire">Wire</SelectItem>
+                      <SelectItem value="card">Card</SelectItem>
                     </SelectContent>
                   </Select>
                   <FormMessage />
@@ -549,6 +621,7 @@ export function VendorForm({
             {watchMethod === "ach" && <AchSubform form={form} />}
             {watchMethod === "check" && <CheckSubform form={form} />}
             {watchMethod === "wire" && <WireSubform form={form} />}
+            {watchMethod === "card" && <CardSubform form={form} />}
           </section>
         </fieldset>
 

@@ -22,7 +22,8 @@ vendorsRouter.get("/vendors", async (_req, res, next) => {
   }
 });
 
-// POST /vendors — create. Rejects `card` at the zod schema level per §6.2.6.
+// POST /vendors — create. Zod validates `payment_method` against all four
+// supported values (ach / check / wire / card) per §6.2.6.
 vendorsRouter.post(
   "/vendors",
   validate(vendorCreateRequestSchema),

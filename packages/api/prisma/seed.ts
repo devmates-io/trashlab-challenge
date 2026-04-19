@@ -188,7 +188,8 @@ async function main() {
 
   // -------------------------------------------------------------------------
   // §6.8.4 — Vendors. Random CUIDs. Payment-details shapes per §6.2.6.
-  // Card is the one seed-only exception (Linear Cloud, Q80 Option 1).
+  // Linear Cloud Inc. is seeded as a card vendor for demo coverage; reviewers
+  // can also create additional card vendors through the /vendors/new UI.
   // -------------------------------------------------------------------------
   const vendorSpecs: VendorSpec[] = [
     {

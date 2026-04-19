@@ -218,7 +218,6 @@ during build.
 | Mobile app | **CUT** | Desktop-only web; no native app. |
 | Email / Slack notifications on approval events | **CUT** | Notification infra is plumbing with low eval signal; audit trail on the bill covers the "who approved when" requirement. |
 | Reporting / 1099 generation | **CUT** | Tax and reporting are separate surfaces. |
-| Virtual card issuance | **PARTIAL** | `card` payment method is selectable (§6.2, §6.7) but is a mocked status string; no card issuance flow. |
 
 ## 3.3 Evaluation criteria mapping
 
@@ -1012,16 +1011,10 @@ union keyed on `Vendor.payment_method`. Shapes per method:
 | `ach` | `routing_number` (string, 9 digits, numeric), `account_number` (string, 4–17 digits, numeric), `account_holder_name` (string, 1–100 chars) | Regex-validated; routing_number checksum NOT verified (would require real routing-number table) |
 | `check` | `address_line1` (string, 1–100 chars), `address_line2` (string?, 0–100), `city` (string, 1–50), `state` (string, 2 char US state code), `postal_code` (string, US ZIP regex) | US-only for MVP |
 | `wire` | `bank_name` (string, 1–100), `swift_code` (string, 8 or 11 chars), `iban` (string, 15–34 chars), `account_holder_name` (string, 1–100) | No checksum validation on IBAN |
-| `card` | `card_brand` (enum: `visa`, `mastercard`, `amex`, `discover`), `last_four` (string, exactly 4 digits) | No real card data — last_four is cosmetic only; MVP does NOT support card entry flow (§3.2 PARTIAL). Seed data only. |
+| `card` | `card_brand` (enum: `visa`, `mastercard`, `amex`, `discover`), `last_four` (string, exactly 4 digits, numeric) | Cosmetic only — no PAN, CVV, or expiry captured; `last_four` is a display label, not a secret |
 
 The shared `packages/shared/src/schemas/vendor.ts` exports this as a single
 zod `discriminatedUnion('method', [...])`. API and web both import it.
-
-Special case for `card`: because the MVP does not implement vendor card-entry
-UX, the vendor create/edit form **hides** the `card` option. Card-method
-vendors can only be created by the seed script. Bills against card-method
-vendors still exist in demo data to prove the payment method flows through
-(§6.7).
 
 ### 6.2.7 Deletion & referential integrity policy
 
@@ -1805,7 +1798,7 @@ Request body:
 |---|---|---|
 | `name` | string | 1–100 chars |
 | `contact_email` | string? | valid email if present |
-| `payment_method` | `PaymentMethod` | `ach`, `check`, or `wire` (not `card` — §6.2.6) |
+| `payment_method` | `PaymentMethod` | One of `ach`, `check`, `wire`, `card` (§6.2.2) |
 | `payment_details` | object | Discriminated union per §6.2.6, validated by zod |
 
 Response 201: `VendorDTO` (all fields of `Vendor` entity).
@@ -2210,9 +2203,8 @@ validation.
 2. **Invoice number** — `Input`, 1–50 chars. Required.
 3. **Issue date** — shadcn `DatePicker`. Required.
 4. **Due date** — `DatePicker`, must be ≥ issue date (client-side validation). Required.
-5. **Line items** — dynamic list; add/remove buttons. Each row: description (`Input`) + amount (`Input` with `$` prefix, dollars-and-cents input). At least one required. Below the list: running total with explicit "Total: $X.XX" label. Must equal the bill amount (next field).
-6. **Total amount** — `Input` with `$` prefix. Must equal sum of line items (real-time mismatch indicator: red text + "Line items sum to $X, total is $Y"). Required.
-7. **Invoice file** — `FileUpload` (shadcn + react-dropzone). Accepts PDF, PNG, JPEG up to 10 MB. Shows filename + "Remove" once uploaded. Upload happens immediately (`POST /uploads`), yielding `attachment_id`; form stores it but doesn't submit until user clicks primary button.
+5. **Line items** — dynamic list; add/remove buttons. Each row: description (`Input`) + amount (`Input` with `$` prefix, dollars-and-cents input). At least one required. Below the list: authoritative running total rendered as a read-only "Total: $X.XX". The total updates on blur of any line-item amount input and whenever rows are added/removed; there is **no separate editable "Total amount" input**. On submit, the client computes `amount_cents = sum(line_items[*].amount_cents)` and sends it to `POST /bills` / `PATCH /bills/:id`, so the server-side invariant `amount_cents == sum(line_items.amount_cents)` (§6.2.5 #1) is satisfied by construction.
+6. **Invoice file** — `FileUpload` (shadcn + react-dropzone). Accepts PDF, PNG, JPEG up to 10 MB. Shows filename + "Remove" once uploaded. Upload happens immediately (`POST /uploads`), yielding `attachment_id`; form stores it but doesn't submit until user clicks primary button.
 
 **Footer bar**:
 
@@ -2369,11 +2361,12 @@ Unified form (same pattern as §6.6.5).
 
 1. **Name** — `Input`, 1–100 chars, required.
 2. **Contact email** — `Input` type=email, optional.
-3. **Payment method** — shadcn `Select` with options `ACH / Check / Wire`. `Card` is **hidden** from this dropdown per §6.2.6 (seed-only).
+3. **Payment method** — shadcn `Select` with options `ACH / Check / Wire / Card`.
 4. **Payment details** — renders one of four sub-forms based on method:
    - ACH: routing (9-digit), account (4–17 digit), account_holder_name.
    - Check: address_line1, address_line2 (opt), city, state (2-letter), postal_code (ZIP regex).
    - Wire: bank_name, swift_code (8 or 11 chars), iban (15–34 chars), account_holder_name.
+   - Card: card_brand (Select with `Visa / Mastercard / Amex / Discover`), last_four (4-digit numeric `Input`).
 
 Switching `payment_method` resets the payment_details sub-form to avoid
 mixed-shape errors (§6.2 invariant "Changing `payment_method` requires
@@ -2759,10 +2752,10 @@ The reviewer sees these names in vendor lists and bill rows.
 | Turnkey IT Solutions | Hardware / IT | `ach` | routing `061000104`, account `...6678`, holder "Turnkey IT Solutions LLC" | `true` |
 | Precision Tools Inc. | Equipment | `ach` | routing `114000093`, account `...2215`, holder "Precision Tools Inc" | `true` |
 
-**Card note**: Linear Cloud is the single `card`-method vendor (Q80 Option 1).
-Created only by seed; the vendor create/edit form hides the card option
-(§6.2.6, §6.6.8). One paid bill uses it (see PD3 below) to prove the method
-flows end-to-end.
+**Card note**: Linear Cloud is the seeded `card`-method vendor (Q80 Option 1),
+chosen so the dashboard and a paid bill (see PD3 below) exercise the card rail
+out of the box. Reviewer-created card vendors behave identically — the vendor
+create/edit form (§6.6.8) exposes `card` alongside `ach`, `check`, and `wire`.
 
 **Routing numbers**: use real-looking 9-digit ABA routing number prefixes for
 plausibility; no checksum validation (§6.2.6). Account numbers shown masked
@@ -2956,8 +2949,7 @@ Simple assertions (CRUD):
 
 ### V-AC-1 — Create vendor (C-V1, C-V2)
 - `POST /vendors` with valid body returns `201` and a `VendorDTO`.
-- The body is validated against the §6.2.6 discriminated union for the chosen `payment_method`.
-- `POST /vendors` with `payment_method = "card"` returns `400 VALIDATION_ERROR` (card vendors are seed-only per §6.2.6, §6.6.8).
+- The body is validated against the §6.2.6 discriminated union for the chosen `payment_method` (accepts any of `ach`, `check`, `wire`, `card`).
 
 ### V-AC-2 — Payment-method-specific fields in UI (C-V2)
 - In the vendor create form (`/vendors/new`), selecting a payment method hides the other methods' fields and shows only that method's required fields (per §6.2.6 table).
@@ -3979,7 +3971,7 @@ checklist**, and references.
 - Seed of 4 users from §6.8.2 (baked into first seed pass to validate scaffolding)
 - `GET /users`, `GET /users/me`, `/vendors` CRUD endpoints (§6.5.4)
 - User switcher wired (§6.6.1) — localStorage persistence, X-User-Id header injection
-- Vendors list + create/edit form + detail pages (§6.6.7, §6.6.8) — payment-method-specific sub-forms; `card` hidden from dropdown
+- Vendors list + create/edit form + detail pages (§6.6.7, §6.6.8) — payment-method-specific sub-forms for all four methods (`ach`, `check`, `wire`, `card`)
 
 **Sub-steps**:
 1. Prisma `User` + `Vendor` models; migrate
@@ -3993,7 +3985,7 @@ checklist**, and references.
 **Done when**:
 - Switching users in the UI changes `X-User-Id` header on subsequent requests (verifiable in devtools Network tab) — §7 U-AC-2
 - Creating a vendor through the form persists and appears in the list — §7 V-AC-1
-- Selecting `card` as payment method in the UI is not possible (not in dropdown) — §7 V-AC-1 last bullet
+- Selecting `card` as payment method in the UI reveals the card sub-form (card_brand + last_four) and persists a `card`-method vendor — §6.6.8, §7 V-AC-1
 - Deleting a vendor with no bills returns 204 (manually curl) — §7 V-AC-7
 
 ### WI-03 — Bills draft lifecycle (40 min, P0, depends on WI-02)

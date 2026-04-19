@@ -86,7 +86,6 @@ const billFormSchema = z
         }),
       )
       .min(1, "At least one line item"),
-    amount_dollars: amountDollarsSchema,
     attachment_id: z.string().nullable().optional(),
   })
   .superRefine((val, ctx) => {
@@ -95,18 +94,6 @@ const billFormSchema = z
         code: z.ZodIssueCode.custom,
         path: ["due_date"],
         message: "Must be on or after the issue date",
-      });
-    }
-    const lineSum = val.line_items.reduce((acc, li) => {
-      const c = parseDollars(li.amount_dollars);
-      return acc + (Number.isFinite(c) ? c : 0);
-    }, 0);
-    const total = parseDollars(val.amount_dollars);
-    if (Number.isFinite(total) && total > 0 && total !== lineSum) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["amount_dollars"],
-        message: `Line items sum to ${formatMoney(lineSum)}; total is ${formatMoney(total)}`,
       });
     }
   });
@@ -125,7 +112,6 @@ function defaultValues(initial?: BillDetailDTO, vendorIdHint?: string): BillForm
         description: li.description,
         amount_dollars: centsToDollars(li.amount_cents),
       })),
-      amount_dollars: centsToDollars(initial.amount_cents),
       attachment_id: initial.attachment?.id ?? null,
     };
   }
@@ -135,23 +121,30 @@ function defaultValues(initial?: BillDetailDTO, vendorIdHint?: string): BillForm
     issue_date: "",
     due_date: "",
     line_items: [{ description: "", amount_dollars: "" }],
-    amount_dollars: "",
     attachment_id: null,
   };
 }
 
 // Map the form values to a BillCreateRequest payload (server-side zod schema).
+// `amount_cents` is derived from the line-items sum — the bill's total is
+// always exactly the sum of its line items; the UI no longer asks the user
+// to re-enter it.
 function toRequest(values: BillFormValues): BillCreateRequest {
+  const line_items = values.line_items.map((li) => ({
+    description: li.description,
+    amount_cents: parseDollars(li.amount_dollars),
+  }));
+  const amount_cents = line_items.reduce(
+    (acc, li) => acc + (Number.isFinite(li.amount_cents) ? li.amount_cents : 0),
+    0,
+  );
   return {
     vendor_id: values.vendor_id,
     invoice_number: values.invoice_number,
-    amount_cents: parseDollars(values.amount_dollars),
+    amount_cents,
     issue_date: values.issue_date,
     due_date: values.due_date,
-    line_items: values.line_items.map((li) => ({
-      description: li.description,
-      amount_cents: parseDollars(li.amount_dollars),
-    })),
+    line_items,
     attachment_id: values.attachment_id ?? null,
   };
 }
@@ -302,6 +295,7 @@ export function BillForm({
     control,
     handleSubmit,
     watch,
+    getValues,
     setValue,
     setError,
     formState: { errors, isSubmitting },
@@ -313,27 +307,38 @@ export function BillForm({
   });
 
   const liveValues = watch();
-  const lineItemsSum = React.useMemo(() => {
-    return (liveValues.line_items ?? []).reduce((acc, li) => {
+  // react-hook-form's `watch()` doesn't reliably re-render on nested
+  // useFieldArray edits (only on append/remove), so we recompute the
+  // visible sum explicitly on blur of any amount input and whenever the
+  // array shape changes. This sum is now the authoritative bill total.
+  const computeLineItemsSum = React.useCallback(() => {
+    return (getValues("line_items") ?? []).reduce((acc, li) => {
       const c = parseDollars(li?.amount_dollars);
       return acc + (Number.isFinite(c) ? c : 0);
     }, 0);
-  }, [liveValues.line_items]);
-  const totalCents = parseDollars(liveValues.amount_dollars);
-  const mismatch =
-    Number.isFinite(totalCents) &&
-    totalCents > 0 &&
-    totalCents !== lineItemsSum;
+  }, [getValues]);
+  const [lineItemsSum, setLineItemsSum] = React.useState<number>(() =>
+    computeLineItemsSum(),
+  );
+  const refreshLineItemsSum = React.useCallback(() => {
+    setLineItemsSum(computeLineItemsSum());
+  }, [computeLineItemsSum]);
+  // Keep the sum in sync when rows are added/removed or when initial data loads.
+  React.useEffect(() => {
+    refreshLineItemsSum();
+  }, [fields.length, refreshLineItemsSum]);
 
   // Map API field_issues back onto form fields (react-hook-form setError).
+  // The server speaks `line_items.N.amount_cents`; the form field is
+  // `line_items.N.amount_dollars`.
   function applyApiFieldIssues(err: unknown) {
     if (!(err instanceof ApiError)) return false;
     if (err.fieldIssues.length === 0) return false;
     for (const issue of err.fieldIssues) {
-      // Map server "line_items.0.amount_cents" → our "line_items.0.amount_dollars".
-      const path = issue.path
-        .replace(/\.amount_cents\b/g, ".amount_dollars")
-        .replace(/^amount_cents$/, "amount_dollars");
+      const path = issue.path.replace(
+        /\.amount_cents\b/g,
+        ".amount_dollars",
+      );
       setError(path as never, { type: "server", message: issue.message });
     }
     return true;
@@ -543,16 +548,27 @@ export function BillForm({
                     <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground">
                       $
                     </span>
-                    <Input
-                      className={cn(
-                        "pl-7",
-                        liErr?.amount_dollars && "border-destructive",
-                      )}
-                      inputMode="decimal"
-                      placeholder="0.00"
-                      {...register(`line_items.${i}.amount_dollars` as const)}
-                      disabled={isBusy}
-                    />
+                    {(() => {
+                      const amountReg = register(
+                        `line_items.${i}.amount_dollars` as const,
+                      );
+                      return (
+                        <Input
+                          className={cn(
+                            "pl-7",
+                            liErr?.amount_dollars && "border-destructive",
+                          )}
+                          inputMode="decimal"
+                          placeholder="0.00"
+                          {...amountReg}
+                          onBlur={(e) => {
+                            amountReg.onBlur(e);
+                            refreshLineItemsSum();
+                          }}
+                          disabled={isBusy}
+                        />
+                      );
+                    })()}
                   </div>
                   {liErr?.amount_dollars && (
                     <p className="mt-1 text-xs font-medium text-destructive">
@@ -585,56 +601,26 @@ export function BillForm({
           )}
         </div>
 
-        <div className="mt-4 flex items-center justify-end gap-2 border-t pt-3 text-sm">
-          <span className="text-muted-foreground">Total:</span>
-          <span className="font-semibold">{formatMoney(lineItemsSum)}</span>
+        <div className="mt-4 flex items-center justify-end gap-2 border-t pt-3">
+          <span className="text-sm text-muted-foreground">Total:</span>
+          <span className="text-lg font-semibold">
+            {formatMoney(lineItemsSum)}
+          </span>
         </div>
       </section>
 
-      {/* Total + attachment */}
+      {/* Attachment */}
       <section className="rounded-lg border bg-card p-6 shadow-sm">
-        <div className="grid gap-5">
-          <div className="space-y-2">
-            <Label htmlFor="amount_dollars">Total amount</Label>
-            <div className="relative max-w-[260px]">
-              <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground">
-                $
-              </span>
-              <Input
-                id="amount_dollars"
-                inputMode="decimal"
-                placeholder="0.00"
-                {...register("amount_dollars")}
-                disabled={isBusy}
-                className={cn(
-                  "pl-7",
-                  (errors.amount_dollars || mismatch) && "border-destructive",
-                )}
-              />
-            </div>
-            {errors.amount_dollars ? (
-              <p className="text-sm font-medium text-destructive">
-                {errors.amount_dollars.message as string}
-              </p>
-            ) : mismatch ? (
-              <p className="text-sm font-medium text-destructive">
-                Line items sum to {formatMoney(lineItemsSum)}; total is{" "}
-                {formatMoney(totalCents)}
-              </p>
-            ) : null}
-          </div>
-
-          <div className="space-y-2">
-            <Label>Invoice file</Label>
-            <AttachmentInput
-              initial={initial?.attachment}
-              value={liveValues.attachment_id}
-              onChange={(id) =>
-                setValue("attachment_id", id, { shouldDirty: true })
-              }
-              disabled={isBusy}
-            />
-          </div>
+        <div className="space-y-2">
+          <Label>Invoice file</Label>
+          <AttachmentInput
+            initial={initial?.attachment}
+            value={liveValues.attachment_id}
+            onChange={(id) =>
+              setValue("attachment_id", id, { shouldDirty: true })
+            }
+            disabled={isBusy}
+          />
         </div>
       </section>
 

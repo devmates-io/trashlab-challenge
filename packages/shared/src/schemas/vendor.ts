@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { PAYMENT_METHOD_VALUES } from "../enums.js";
 import { cuidSchema, isoDateTimeStringSchema } from "./common.js";
 
 // §6.2.6 — Vendor.payment_details is a discriminated union keyed on
@@ -43,7 +44,9 @@ export const cardPaymentDetailsSchema = z.object({
   last_four: z.string().regex(/^\d{4}$/, "Must be exactly 4 digits"),
 });
 
-// Storage / API-response discriminated union — card is permitted (seed data).
+// Discriminated union over every supported payment method. Used for both
+// storage / API-response shapes and for API-request bodies — all four methods
+// (ach, check, wire, card) are first-class and user-selectable per §6.2.6.
 export const paymentDetailsStoredSchema = z.discriminatedUnion("method", [
   achPaymentDetailsSchema,
   checkPaymentDetailsSchema,
@@ -52,13 +55,10 @@ export const paymentDetailsStoredSchema = z.discriminatedUnion("method", [
 ]);
 export type PaymentDetailsStored = z.infer<typeof paymentDetailsStoredSchema>;
 
-// API-request (create/edit) variant — card is REJECTED per §6.2.6.
-// "Card-method vendors can only be created by the seed script."
-export const paymentDetailsRequestSchema = z.discriminatedUnion("method", [
-  achPaymentDetailsSchema,
-  checkPaymentDetailsSchema,
-  wirePaymentDetailsSchema,
-]);
+// Alias retained for backward-compatibility with existing imports; the
+// request-side and stored-side shapes are identical now that card is
+// accepted on create/edit.
+export const paymentDetailsRequestSchema = paymentDetailsStoredSchema;
 export type PaymentDetailsRequest = z.infer<typeof paymentDetailsRequestSchema>;
 
 // ---- DTO and mutation schemas ----
@@ -67,7 +67,7 @@ export const vendorDtoSchema = z.object({
   id: cuidSchema,
   name: z.string().min(1).max(100),
   contact_email: z.string().email().nullable().optional(),
-  payment_method: z.enum(["ach", "check", "wire", "card"]),
+  payment_method: z.enum(PAYMENT_METHOD_VALUES),
   payment_details: paymentDetailsStoredSchema,
   is_active: z.boolean(),
   created_at: isoDateTimeStringSchema.optional(),
@@ -75,17 +75,14 @@ export const vendorDtoSchema = z.object({
 });
 export type VendorDTO = z.infer<typeof vendorDtoSchema>;
 
-// POST /vendors: card method not allowed; payment_method and payment_details
-// must agree (validated via superRefine).
+// POST /vendors: payment_method and payment_details must agree on the
+// `method` discriminator (validated via superRefine). All four methods are
+// accepted per §6.2.6.
 export const vendorCreateRequestSchema = z
   .object({
     name: z.string().min(1).max(100),
     contact_email: z.string().email().optional().nullable(),
-    payment_method: z.enum(["ach", "check", "wire"], {
-      errorMap: () => ({
-        message: "payment_method must be one of ach, check, wire",
-      }),
-    }),
+    payment_method: z.enum(PAYMENT_METHOD_VALUES),
     payment_details: paymentDetailsRequestSchema,
   })
   .superRefine((val, ctx) => {
@@ -102,12 +99,12 @@ export type VendorCreateRequest = z.infer<typeof vendorCreateRequestSchema>;
 
 // PATCH /vendors/:id: per §6.5.4, a partial of the create body, BUT if
 // payment_method changes, payment_details must also be provided with the new
-// shape. superRefine catches the mismatch.
+// shape. superRefine catches the mismatch. All four methods are accepted.
 export const vendorPatchRequestSchema = z
   .object({
     name: z.string().min(1).max(100).optional(),
     contact_email: z.string().email().optional().nullable(),
-    payment_method: z.enum(["ach", "check", "wire"]).optional(),
+    payment_method: z.enum(PAYMENT_METHOD_VALUES).optional(),
     payment_details: paymentDetailsRequestSchema.optional(),
   })
   .superRefine((val, ctx) => {
