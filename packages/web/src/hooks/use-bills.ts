@@ -15,7 +15,8 @@ import type {
   PaymentDTO,
   VendorDTO,
 } from "@bill-pay/shared";
-import { apiFetch } from "@/lib/api";
+import * as React from "react";
+import { apiFetch, apiFetchBlob } from "@/lib/api";
 import type { BillSummary } from "@/hooks/use-vendors";
 
 // ---------------------------------------------------------------------------
@@ -314,4 +315,55 @@ const API_BASE_URL =
 
 export function uploadUrl(storedFilename: string): string {
   return `${API_BASE_URL}/uploads/${storedFilename}`;
+}
+
+// Fetches GET /uploads/:stored_filename with the authenticated apiFetch wrapper
+// and exposes the response as an object URL suitable for <iframe>/<img>/<a>.
+// Browsers do not attach custom headers (X-User-Id) to native element loads,
+// so we can't point elements directly at /uploads/* — we download via fetch
+// and hand the viewer a blob: URL instead.
+export function useAttachmentBlobUrl(storedFilename: string | null): {
+  url: string | null;
+  isLoading: boolean;
+  error: Error | null;
+} {
+  const [url, setUrl] = React.useState<string | null>(null);
+  const [isLoading, setIsLoading] = React.useState<boolean>(
+    storedFilename !== null,
+  );
+  const [error, setError] = React.useState<Error | null>(null);
+
+  React.useEffect(() => {
+    if (!storedFilename) {
+      setUrl(null);
+      setIsLoading(false);
+      setError(null);
+      return;
+    }
+
+    let cancelled = false;
+    let createdUrl: string | null = null;
+    setIsLoading(true);
+    setError(null);
+
+    apiFetchBlob(`/uploads/${storedFilename}`)
+      .then((blob) => {
+        if (cancelled) return;
+        createdUrl = URL.createObjectURL(blob);
+        setUrl(createdUrl);
+        setIsLoading(false);
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        setError(err instanceof Error ? err : new Error(String(err)));
+        setIsLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+      if (createdUrl) URL.revokeObjectURL(createdUrl);
+    };
+  }, [storedFilename]);
+
+  return { url, isLoading, error };
 }
