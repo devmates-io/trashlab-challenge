@@ -35,6 +35,15 @@ function parseStatus(value: string | null): BillStatus | null {
   return match?.value ?? null;
 }
 
+// The dashboard Overdue stat card deep-links to /bills?overdue=1. Accept a
+// few truthy spellings so inbound links from future/external callers still
+// flip the switch; an empty/absent value means off.
+function parseOverdue(value: string | null): boolean {
+  if (value === null) return false;
+  const normalized = value.trim().toLowerCase();
+  return normalized === "1" || normalized === "true" || normalized === "yes";
+}
+
 function todayIso(): string {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
@@ -90,7 +99,7 @@ export default function BillsListPage(): React.ReactElement {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const status = parseStatus(searchParams.get("status"));
-  const [overdueOnly, setOverdueOnly] = React.useState(false);
+  const overdueOnly = parseOverdue(searchParams.get("overdue"));
 
   const billsQuery = useBills(status ?? undefined);
 
@@ -98,6 +107,13 @@ export default function BillsListPage(): React.ReactElement {
     const sp = new URLSearchParams(searchParams);
     if (next == null) sp.delete("status");
     else sp.set("status", next);
+    setSearchParams(sp, { replace: true });
+  }
+
+  function setOverdueOnly(next: boolean) {
+    const sp = new URLSearchParams(searchParams);
+    if (next) sp.set("overdue", "1");
+    else sp.delete("overdue");
     setSearchParams(sp, { replace: true });
   }
 
