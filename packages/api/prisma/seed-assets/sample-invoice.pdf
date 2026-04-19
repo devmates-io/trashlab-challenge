@@ -1,0 +1,146 @@
+%PDF-1.4
+%‚„œ”
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R /F2 6 0 R >> >> >>
+endobj
+4 0 obj
+<< /Length 2177 >>
+stream
+BT
+/F2 24 Tf
+50 760 Td
+(INVOICE) Tj
+/F1 12 Tf
+0 -36 Td
+() Tj
+/F2 14 Tf
+0 -18 Td
+(NORTHBRIDGE TRADING COMPANY) Tj
+/F1 10 Tf
+0 -14 Td
+(221 Harborside Drive, Suite 300) Tj
+/F1 10 Tf
+0 -12 Td
+(Port Meridian, OR 97000) Tj
+/F1 10 Tf
+0 -12 Td
+(billing@northbridge-trading.example) Tj
+/F1 10 Tf
+0 -16 Td
+() Tj
+/F1 11 Tf
+0 -16 Td
+(Invoice #: NB-SAMPLE-0001) Tj
+/F1 11 Tf
+0 -14 Td
+(Issue Date: April 18, 2026) Tj
+/F1 11 Tf
+0 -14 Td
+(Due Date: May 18, 2026) Tj
+/F1 11 Tf
+0 -18 Td
+() Tj
+/F2 11 Tf
+0 -14 Td
+(Bill To:) Tj
+/F1 11 Tf
+0 -14 Td
+(Acme Widgets Inc.) Tj
+/F1 11 Tf
+0 -14 Td
+(500 Industrial Parkway) Tj
+/F1 11 Tf
+0 -14 Td
+(Midtown, IL 60000) Tj
+/F1 11 Tf
+0 -22 Td
+() Tj
+/F2 10 Tf
+0 -16 Td
+(Description                                            Qty      Unit       Amount) Tj
+/F1 10 Tf
+0 -12 Td
+(--------------------------------------------------------------------------) Tj
+/F1 10 Tf
+0 -14 Td
+(Consulting services, Q1 engagement                       40   $ 75.00   $3,000.00) Tj
+/F1 10 Tf
+0 -14 Td
+(Travel & lodging reimbursement                            1  $450.00   $  450.00) Tj
+/F1 10 Tf
+0 -14 Td
+(Materials & supplies                                      1   $50.00   $   50.00) Tj
+/F1 10 Tf
+0 -12 Td
+(--------------------------------------------------------------------------) Tj
+/F1 10 Tf
+0 -14 Td
+(                                                         Subtotal   $3,500.00) Tj
+/F1 10 Tf
+0 -12 Td
+(                                                         Tax \(0%\)   $    0.00) Tj
+/F2 11 Tf
+0 -14 Td
+(                                                         TOTAL DUE  $3,500.00) Tj
+/F1 10 Tf
+0 -24 Td
+() Tj
+/F2 11 Tf
+0 -14 Td
+(Remit To:) Tj
+/F1 10 Tf
+0 -14 Td
+(Northbridge Trading Company) Tj
+/F1 10 Tf
+0 -12 Td
+(PO Box 4421) Tj
+/F1 10 Tf
+0 -12 Td
+(Port Meridian, OR 97000) Tj
+/F1 10 Tf
+0 -16 Td
+() Tj
+/F1 9 Tf
+0 -14 Td
+(Payment terms: Net 30. Please reference invoice number on all payments.) Tj
+/F1 9 Tf
+0 -12 Td
+(Questions? billing@northbridge-trading.example \(555\) 010-0199) Tj
+/F1 9 Tf
+0 -18 Td
+() Tj
+/F1 8 Tf
+0 -12 Td
+(This is a sample invoice for software demonstration only.) Tj
+/F1 8 Tf
+0 -10 Td
+(Not a solicitation for payment. Fabricated content.) Tj
+ET
+endstream
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+6 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>
+endobj
+xref
+0 7
+0000000000 65535 f 
+0000000015 00000 n 
+0000000064 00000 n 
+0000000121 00000 n 
+0000000257 00000 n 
+0000002485 00000 n 
+0000002555 00000 n 
+trailer
+<< /Size 7 /Root 1 0 R >>
+startxref
+2630
+%%EOF
