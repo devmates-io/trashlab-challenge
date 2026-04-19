@@ -23,7 +23,13 @@ import type { BillSummary } from "@/hooks/use-vendors";
 // response shapes — §6.5.4 GET /bills/:id). Mirrors the spec exactly.
 // ---------------------------------------------------------------------------
 
-export type BillSummaryDTO = BillSummary;
+// §6.6.4 adds `pending_approver_names` to the /bills list response. Kept
+// optional so narrower consumers (dashboard, vendor detail) that don't request
+// it still type-check. Dashboard overdue/upcoming tables don't render this
+// column, so the backend doesn't populate it for those endpoints.
+export interface BillSummaryDTO extends BillSummary {
+  pending_approver_names?: string[];
+}
 
 export interface AttachmentDTO {
   id: string;

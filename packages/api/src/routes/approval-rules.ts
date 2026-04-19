@@ -1,12 +1,9 @@
 import { Router } from "express";
-import { z } from "zod";
 import type { Prisma } from "@prisma/client";
 import {
   approvalRuleCreateRequestSchema,
   approvalRulePatchRequestSchema,
-  cuidSchema,
-  moneyCentsSchema,
-  positiveMoneyCentsSchema,
+  approvalRulePreviewRequestSchema,
 } from "@bill-pay/shared";
 import { prisma } from "../db.js";
 import { HttpProblem } from "../lib/problem.js";
@@ -71,25 +68,15 @@ approvalRulesRouter.post(
   },
 );
 
-// POST /approval-rules/preview — no persistence.
-//
-// SPEC DEVIATION FLAG: the spec field name is `sample_bill_amount_cents`
-// (optional, defaults to `min_amount_cents`). The shared zod schema uses
-// `target_amount_cents` (required). We honor the spec wire contract here
-// with a local schema; see summary for the flag.
-const previewRequestSchema = z
-  .object({
-    min_amount_cents: moneyCentsSchema,
-    approver_user_ids: z.array(cuidSchema).min(1),
-    sample_bill_amount_cents: positiveMoneyCentsSchema.optional(),
-  });
-
+// POST /approval-rules/preview — no persistence. Shared schema enforces the
+// wire contract from §6.5.4: `sample_bill_amount_cents` is optional and
+// defaults to `min_amount_cents` when omitted.
 approvalRulesRouter.post(
   "/approval-rules/preview",
-  validate(previewRequestSchema),
+  validate(approvalRulePreviewRequestSchema),
   async (req, res, next) => {
     try {
-      const body = req.body as z.infer<typeof previewRequestSchema>;
+      const body = req.body as typeof approvalRulePreviewRequestSchema._output;
       const sampleAmount = body.sample_bill_amount_cents ?? body.min_amount_cents;
       const activeUsers = await prisma.user.findMany({
         where: { isActive: true },

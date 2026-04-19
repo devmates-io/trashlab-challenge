@@ -48,16 +48,24 @@ function PendingApproversCell({ bill }: { bill: BillSummaryDTO }) {
   if (bill.status !== "pending_approval") {
     return <span className="text-muted-foreground">—</span>;
   }
-  // §6.6.4 calls for the union of eligible approver names, but GET /bills
-  // only returns `pending_approval_count` (§6.5.4). Until the API exposes the
-  // names, we render the count. Flagged as a dependency on Engineer B.
   if (bill.pending_approval_count === 0) {
     return <span className="text-muted-foreground">—</span>;
   }
+  // §6.6.4: render the union of pending-approval eligible approver names.
+  // Fall back to the count if an older API response omits the field.
+  const names = bill.pending_approver_names ?? [];
+  if (names.length === 0) {
+    return (
+      <span className="text-sm">
+        {bill.pending_approval_count} approval
+        {bill.pending_approval_count === 1 ? "" : "s"} pending
+      </span>
+    );
+  }
+  const joined = names.join(", ");
   return (
-    <span className="text-sm">
-      {bill.pending_approval_count} approval
-      {bill.pending_approval_count === 1 ? "" : "s"} pending
+    <span className="block max-w-[18rem] truncate text-sm" title={joined}>
+      {joined}
     </span>
   );
 }

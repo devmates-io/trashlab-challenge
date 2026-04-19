@@ -158,11 +158,15 @@ export function ruleToDto(
 // ---- bill summaries and detail -------------------------------------------
 
 // The caller assembles these from Prisma `include` results; we expect the
-// join fields to be present where noted.
+// join fields to be present where noted. `approvals[].eligibleApproverUserIds`
+// is optional on the type — callers that want `pending_approver_names` in the
+// output must include it in their Prisma select AND pass `userNameById`.
 export interface BillForSummary extends Bill {
   vendor: Pick<Vendor, "name">;
   creator: Pick<User, "name">;
-  approvals?: Pick<BillApproval, "status">[];
+  approvals?: (Pick<BillApproval, "status"> & {
+    eligibleApproverUserIds?: string[];
+  })[];
   attachment?: { id: string } | null;
 }
 
@@ -185,6 +189,33 @@ export function billSummaryToDto(b: BillForSummary) {
     pending_approval_count,
     has_attachment: !!b.attachment,
   };
+}
+
+// §6.6.4 — Bills list shows a "Pending approvers" column with the deduplicated
+// union of pending approvals' eligible approver names. Callers that need this
+// field (currently only GET /bills) must `include` approvals with
+// `eligibleApproverUserIds` selected AND pass a user-name map. Other callers
+// (dashboard tables) have no such column and keep using `billSummaryToDto`.
+export function billSummaryToDtoWithPendingApprovers(
+  b: BillForSummary,
+  userNameById: ReadonlyMap<string, string>,
+) {
+  const base = billSummaryToDto(b);
+  const pendingApprovals = b.approvals
+    ? b.approvals.filter((a) => a.status === "pending")
+    : [];
+  const seen = new Set<string>();
+  const pending_approver_names: string[] = [];
+  for (const approval of pendingApprovals) {
+    const ids = approval.eligibleApproverUserIds ?? [];
+    for (const uid of ids) {
+      if (seen.has(uid)) continue;
+      seen.add(uid);
+      const name = userNameById.get(uid);
+      if (name) pending_approver_names.push(name);
+    }
+  }
+  return { ...base, pending_approver_names };
 }
 
 export interface BillForDetail extends Bill {

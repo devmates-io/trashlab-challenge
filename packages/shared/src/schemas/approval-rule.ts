@@ -32,12 +32,14 @@ export type ApprovalRulePatchRequest = z.infer<
   typeof approvalRulePatchRequestSchema
 >;
 
-// POST /approval-rules/preview — given a candidate rule + bill amount, API
-// returns the eligible approvers under those conditions without persisting.
+// POST /approval-rules/preview — given a candidate rule + optional sample
+// bill amount, API returns the eligible approvers under those conditions
+// without persisting. Per spec §6.5.4, `sample_bill_amount_cents` is optional
+// and defaults server-side to `min_amount_cents` when omitted.
 export const approvalRulePreviewRequestSchema = z.object({
   min_amount_cents: moneyCentsSchema,
   approver_user_ids: z.array(cuidSchema).min(1),
-  target_amount_cents: positiveMoneyCentsSchema,
+  sample_bill_amount_cents: positiveMoneyCentsSchema.optional(),
 });
 export type ApprovalRulePreviewRequest = z.infer<
   typeof approvalRulePreviewRequestSchema

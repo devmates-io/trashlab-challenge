@@ -10,7 +10,7 @@ import { validate } from "../middleware/validate.js";
 import {
   billDetailInclude,
   billDetailToDto,
-  billSummaryToDto,
+  billSummaryToDtoWithPendingApprovers,
 } from "../lib/dto.js";
 import {
   approveBillT5T6,
@@ -26,23 +26,33 @@ import {
 export const billsRouter = Router();
 
 // GET /bills — list, sorted by due_date asc, optional ?status= filter.
+// Includes `pending_approver_names` per §6.6.4 (union of names across pending
+// BillApproval rows' `eligibleApproverUserIds`, deduplicated).
 billsRouter.get(
   "/bills",
   validate(billListQuerySchema, "query"),
   async (req, res, next) => {
     try {
       const { status } = req.query as unknown as { status?: string };
-      const rows = await prisma.bill.findMany({
-        where: status ? { status: status as never } : undefined,
-        orderBy: { dueDate: "asc" },
-        include: {
-          vendor: { select: { name: true } },
-          creator: { select: { name: true } },
-          approvals: { select: { status: true } },
-          attachment: { select: { id: true } },
-        },
-      });
-      res.json(rows.map(billSummaryToDto));
+      const [rows, users] = await Promise.all([
+        prisma.bill.findMany({
+          where: status ? { status: status as never } : undefined,
+          orderBy: { dueDate: "asc" },
+          include: {
+            vendor: { select: { name: true } },
+            creator: { select: { name: true } },
+            approvals: {
+              select: { status: true, eligibleApproverUserIds: true },
+            },
+            attachment: { select: { id: true } },
+          },
+        }),
+        prisma.user.findMany({ select: { id: true, name: true } }),
+      ]);
+      const userNameById = new Map(users.map((u) => [u.id, u.name] as const));
+      res.json(
+        rows.map((r) => billSummaryToDtoWithPendingApprovers(r, userNameById)),
+      );
     } catch (err) {
       next(err);
     }

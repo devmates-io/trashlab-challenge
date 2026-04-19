@@ -46,9 +46,9 @@ export function RulePreview({
     previewFn({
       min_amount_cents: debouncedMin,
       approver_user_ids: debouncedIds,
-      // §6.5.4: sample bill amount defaults to threshold. Shared schema
-      // enforces >= 1, so clamp to avoid a 400 when threshold is $0.
-      target_amount_cents: Math.max(debouncedMin, 1),
+      // §6.5.4: sample_bill_amount_cents is optional and defaults server-side
+      // to min_amount_cents. We omit it so the default applies; when the UI
+      // gains a "preview at custom amount" affordance it can pass it through.
     });
     // We key on idsKey rather than the array identity for stability.
   }, [previewFn, debouncedMin, idsKey, debouncedIds]);
