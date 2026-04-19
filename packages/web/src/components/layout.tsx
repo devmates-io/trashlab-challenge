@@ -1,5 +1,5 @@
 import * as React from "react";
-import { NavLink, Outlet, useLocation, useMatches } from "react-router-dom";
+import { NavLink, Outlet, useMatches } from "react-router-dom";
 import { LayoutDashboard, Receipt, Shield, Users } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { UserSwitcher } from "@/components/user-switcher";
@@ -8,6 +8,12 @@ type Nav = {
   to: string;
   label: string;
   icon: React.ComponentType<{ className?: string }>;
+};
+
+// Route `handle` metadata contract. Attach via `handle: { title: "..." }` on
+// a route definition to expose a page title to the layout header.
+export type RouteHandle = {
+  title?: string;
 };
 
 // §6.6.1 sidebar — exact icons per spec.
@@ -49,26 +55,15 @@ function Sidebar() {
   );
 }
 
-function pageTitleFromPath(pathname: string): string {
-  if (pathname === "/") return "Dashboard";
-  if (pathname.startsWith("/bills/new")) return "New bill";
-  if (pathname.match(/^\/bills\/[^/]+\/edit$/)) return "Edit bill";
-  if (pathname.match(/^\/bills\/[^/]+$/)) return "Bill detail";
-  if (pathname === "/bills") return "Bills";
-  if (pathname === "/vendors/new") return "New vendor";
-  if (pathname.match(/^\/vendors\/[^/]+\/edit$/)) return "Edit vendor";
-  if (pathname.match(/^\/vendors\/[^/]+$/)) return "Vendor detail";
-  if (pathname === "/vendors") return "Vendors";
-  if (pathname === "/approval-rules") return "Approval rules";
-  return "";
-}
-
 function Header() {
-  const location = useLocation();
-  const title = pageTitleFromPath(location.pathname);
-  // useMatches is present so downstream screens can set a title on the route
-  // if/when needed without reworking this header.
-  useMatches();
+  const matches = useMatches();
+  // Walk from the deepest match upward so nested routes can override the
+  // title. First match that declares `handle.title` wins.
+  const title =
+    [...matches]
+      .reverse()
+      .map((m) => (m.handle as RouteHandle | undefined)?.title)
+      .find((t): t is string => typeof t === "string" && t.length > 0) ?? "";
   return (
     <header className="sticky top-0 z-10 flex h-16 items-center justify-between border-b bg-background px-8">
       <h1 className="text-2xl font-semibold">{title}</h1>
