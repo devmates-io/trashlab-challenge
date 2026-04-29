@@ -26,6 +26,10 @@ import ApprovalRulesPage from "@/pages/approval-rules/list";
 import UsersListPage from "@/pages/users/list";
 import UserCreatePage from "@/pages/users/new";
 import UserEditPage from "@/pages/users/edit";
+import NotificationsPage from "@/pages/notifications";
+import RecurringListPage from "@/pages/recurring/list";
+import RecurringTemplateNewPage from "@/pages/recurring/new";
+import RecurringTemplateEditPage from "@/pages/recurring/edit";
 import NotFoundPage from "@/pages/not-found";
 
 const handle = (title: string): RouteHandle => ({ title });
@@ -88,6 +92,26 @@ const router = createBrowserRouter([
         path: "approval-rules",
         element: <ApprovalRulesPage />,
         handle: handle("Approval rules"),
+      },
+      {
+        path: "notifications",
+        element: <NotificationsPage />,
+        handle: handle("Notifications"),
+      },
+      {
+        path: "recurring",
+        element: <RecurringListPage />,
+        handle: handle("Recurring bills"),
+      },
+      {
+        path: "recurring/new",
+        element: <RecurringTemplateNewPage />,
+        handle: handle("New recurring template"),
+      },
+      {
+        path: "recurring/:id/edit",
+        element: <RecurringTemplateEditPage />,
+        handle: handle("Edit recurring template"),
       },
       // Admin-only branch. RequireAdmin wraps the user-management routes so
       // a non-admin landing on /users via direct URL is sent back to /

@@ -19,6 +19,7 @@ import type {
 } from "@prisma/client";
 import { HttpProblem } from "../lib/problem.js";
 import { emitBillEvent } from "./audit-log.js";
+import { notifyBillApproved, notifyBillRejected } from "./notifications.js";
 
 // ---------------------------------------------------------------------------
 // §6.4.3 — Eligible approver pool computation.
@@ -251,6 +252,8 @@ export async function approveBill(
       // deterministic (bill-level event comes AFTER the per-approval events).
       occurredAt: new Date(now.getTime() + 1),
     });
+    // §6.10.4 — notify the creator the bill has fully approved.
+    await notifyBillApproved(tx, bill);
   }
 }
 
@@ -351,6 +354,9 @@ export async function rejectBill(
     payload,
     occurredAt: now,
   });
+
+  // §6.10.4 — notify the creator with the rejection reason inline.
+  await notifyBillRejected(tx, bill, reason);
 }
 
 // ---------------------------------------------------------------------------

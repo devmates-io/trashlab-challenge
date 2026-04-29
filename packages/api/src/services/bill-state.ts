@@ -34,6 +34,7 @@ import {
   rejectBill,
 } from "./approval-engine.js";
 import { emitBillEvent } from "./audit-log.js";
+import { notifyBillPaid, notifyBillSubmitted } from "./notifications.js";
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -583,6 +584,11 @@ export async function submitBill(
       occurredAt: now,
     });
 
+    // §6.10.4 — notify every eligible approver across the freshly created
+    // approval slots. Same transaction so a rollback erases both the
+    // state change and the inbox spam.
+    await notifyBillSubmitted(tx, bill, actor.id);
+
     return tx.bill.findUniqueOrThrow({
       where: { id: bill.id },
       include: billDetailInclude,
@@ -877,6 +883,9 @@ export async function payBill(
       realUser,
       payload,
     });
+
+    // §6.10.4 — notify the creator that the bill has settled.
+    await notifyBillPaid(tx, bill, payment.paymentMethod);
 
     return {
       paymentId: payment.id,

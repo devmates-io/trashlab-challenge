@@ -5,6 +5,7 @@ import {
   Loader2,
   LogOut,
   Receipt,
+  Repeat,
   Shield,
   Users,
   UserCog,
@@ -12,6 +13,7 @@ import {
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { UserSwitcher } from "@/components/user-switcher";
+import { NotificationsBell } from "@/components/notifications-bell";
 import { getSessionToken } from "@/lib/api";
 import {
   useCurrentUser,
@@ -45,6 +47,7 @@ const NAV_ITEMS: Nav[] = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard },
   { to: "/bills", label: "Bills", icon: Receipt },
   { to: "/vendors", label: "Vendors", icon: Users },
+  { to: "/recurring", label: "Recurring", icon: Repeat },
   { to: "/approval-rules", label: "Rules", icon: Shield },
   { to: "/users", label: "Users", icon: UserCog, adminOnly: true },
 ];
@@ -124,6 +127,7 @@ function HeaderRightCluster() {
           <span className="capitalize text-muted-foreground">{real.role}</span>
         </div>
       ) : null}
+      <NotificationsBell />
       <Button
         type="button"
         variant="ghost"

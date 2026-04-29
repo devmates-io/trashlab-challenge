@@ -11,6 +11,8 @@ import {
 import { billsRouter } from "./routes/bills.js";
 import { dashboardRouter } from "./routes/dashboard.js";
 import { healthRouter } from "./routes/health.js";
+import { notificationsRouter } from "./routes/notifications.js";
+import { recurringRouter } from "./routes/recurring.js";
 import { uploadsRouter } from "./routes/uploads.js";
 import { usersRouter } from "./routes/users.js";
 import { vendorsRouter } from "./routes/vendors.js";
@@ -39,6 +41,8 @@ app.use(approvalsRouter);
 app.use(approvalRulesRouter);
 app.use(uploadsRouter);
 app.use(dashboardRouter);
+app.use(notificationsRouter);
+app.use(recurringRouter);
 
 // Error handler MUST be registered last.
 app.use(errorHandler);
