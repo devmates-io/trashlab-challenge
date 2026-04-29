@@ -19,6 +19,11 @@ complete, tamper-proof audit trail.
 - Mock payment execution across all four rails with idempotency support
 - Payables dashboard: status totals, overdue list, next-7-days upcoming
 - Full audit trail on every bill event (created, submitted, approved, paid, …)
+- LLM-powered invoice OCR — drop a PDF, auto-fill the bill form (§6.10.1)
+- Bulk approve and bulk pay from the bills list (§6.10.2)
+- Duplicate-bill detection on creation with confirm-anyway override (§6.10.3)
+- In-app notifications with header bell + 30s polling (§6.10.4)
+- Recurring bill templates (monthly / quarterly / yearly) (§6.10.5)
 
 ## What this product does
 
@@ -184,7 +189,10 @@ pnpm db:reset
 ```
 
 **Environment variables** (all documented in `.env.example`): `DATABASE_URL`,
-`API_PORT`, `WEB_PORT`, `UPLOAD_DIR`, `VITE_API_URL`, `SEED_ON_EMPTY`.
+`API_PORT`, `WEB_PORT`, `UPLOAD_DIR`, `VITE_API_URL`, `SEED_ON_EMPTY`,
+`ANTHROPIC_API_KEY` (optional — enables real LLM OCR; falls back to a stub
+extraction when unset, so the demo runs zero-config), `ANTHROPIC_MODEL`
+(optional — overrides the default Claude model).
 
 **Seed contents** (`packages/api/prisma/seed.ts`): 4 users, 2 approval rules,
 9 vendors, 20 bills, 3 attachments — enough to demo every §4.3 step without

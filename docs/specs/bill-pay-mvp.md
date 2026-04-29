@@ -3443,6 +3443,250 @@ on rows that didn't previously carry one.
 
 ---
 
+## 6.10 Tier-1 product completeness features
+
+This section captures five features added to bring the surface closer to
+parity with Ramp Bill Pay. Each was previously listed as an explicit cut in
+§3.2; reversing those cuts is intentional and the rationale is per-feature.
+
+### 6.10.1 LLM-powered invoice OCR
+
+Reverses the §3.2 "AI-powered invoice OCR" cut. Mocked OCR adds no signal,
+but real LLM-vision OCR (Anthropic Claude `claude-sonnet-4-5-20250929`)
+is now low-friction enough to ship as a real feature.
+
+**Endpoint** — `POST /bills/extract` (auth-required).
+
+```json
+{ "attachment_id": "att_…" }
+```
+
+The handler resolves the attachment from either `stagedUploads` (a fresh
+upload) or the persisted `attachments` table (a saved bill with an
+existing file), reads the file from `UPLOAD_DIR`, and submits it to
+Anthropic via raw `fetch` against `/v1/messages`. PDF inputs use the
+`document` content type; PNG/JPEG use `image`. The model responds with a
+JSON object the server validates against `billExtractResponseSchema`.
+
+**Response** —
+
+```json
+{
+  "vendor_name": "Acme Corp",
+  "invoice_number": "INV-001",
+  "amount_cents": 12500,
+  "issue_date": "2026-04-29",
+  "due_date": "2026-05-29",
+  "line_items": [{ "description": "…", "amount_cents": 12500 }],
+  "confidence": 0.94,
+  "source": "anthropic"
+}
+```
+
+Every field except `source` is optional — fields the model couldn't
+confidently identify are omitted, never fabricated. The web client treats
+each field as a suggestion and pre-fills it on the bill form, leaving the
+fields editable.
+
+**No-key fallback** — when `ANTHROPIC_API_KEY` is unset the endpoint
+returns a deterministic stub with `source: "stub"`. This keeps the demo
+zero-config: the reviewer can click "Extract from invoice" without
+provisioning a key, and the UI renders a "Stub extraction — set
+ANTHROPIC_API_KEY for real OCR" warning.
+
+**Vendor matching** — the LLM returns `vendor_name` (string), not a
+`vendor_id`. The web client matches the returned name case-insensitively
+against the active vendor list; on a hit it pre-fills `vendor_id`, on a
+miss it surfaces a toast pointing the user at the vendors page.
+
+**Error codes** — `OCR_PROVIDER_ERROR` (provider non-2xx),
+`OCR_EMPTY_RESPONSE` (no text content in response),
+`OCR_PARSE_ERROR` (returned text isn't valid JSON), `OCR_SCHEMA_ERROR`
+(JSON didn't match `billExtractResponseSchema`),
+`ATTACHMENT_NOT_FOUND` (unknown attachment id),
+`ATTACHMENT_FILE_MISSING` (id resolves but file is missing on disk).
+
+### 6.10.2 Bulk actions on bills
+
+Reverses the §3.2 "Bulk actions" cut. Single-bill actions remain the
+primary surface; bulk endpoints are wrappers that call the existing
+single-bill services per id and assemble a per-bill result envelope.
+
+**Endpoints** —
+
+| Method | Path | Body | Behavior |
+|---|---|---|---|
+| `POST` | `/bills/bulk-approve` | `{ "bill_ids": ["…"] }` | Calls `approveBillT5T6` per id. |
+| `POST` | `/bills/bulk-pay`     | `{ "bill_ids": ["…"] }` | Calls `payBill` per id with `idempotencyKey: null` (the bulk endpoint is itself the idempotency boundary). Vendor's default payment method is used. |
+
+Bills are processed serially, each in its own transaction. A failure on
+bill N does NOT roll back bills 1..N−1 — partial success is the *expected*
+outcome, encoded in the response body as a 200, not a 4xx/5xx.
+
+**Per-bill result envelope** —
+
+```json
+{
+  "results": [
+    { "bill_id": "…", "ok": true },
+    { "bill_id": "…", "ok": false, "code": "NOT_ELIGIBLE_APPROVER", "detail": "…" }
+  ],
+  "succeeded": 1,
+  "failed": 1
+}
+```
+
+**Limits** — request capped at 100 bill ids per call (`bulkBillsRequestSchema`).
+Larger batches must chunk client-side.
+
+**Eligibility (UI-side)** — the bills list multi-select disables the
+"Approve N" button unless every selected row is in `pending_approval`,
+and disables "Pay N" unless every selected row is `approved`. Mixed
+selections show neither button, avoiding "approve some, fail others"
+UX. The API still validates per-bill, so a stale selection that drifted
+across a status transition between selection and click surfaces in the
+result envelope as a per-bill failure.
+
+### 6.10.3 Duplicate-bill detection
+
+Closes a Ramp-prominent fraud-prevention story without touching the rest
+of the codebase: same vendor + same invoice number = highly likely
+duplicate.
+
+**Match definition** — `(vendor_id, invoice_number)` exact case-
+insensitive, status ≠ `rejected`, created within the last 365 days.
+Capped at 5 matches returned. Amount is intentionally NOT part of the
+match: a vendor billing twice with the same invoice number but different
+amounts is a stronger duplicate signal, so the dialog surfaces the
+existing amount alongside the candidate and lets the user decide.
+
+**Enforcement points** —
+
+| When | What |
+|---|---|
+| `POST /bills` (create) | Returns `409 POSSIBLE_DUPLICATE` with `matches[]` embedded in the problem document. `?force=true` query param bypasses the check. |
+| `GET /bills/check-duplicate?vendor_id=…&invoice_number=…` | Idempotent pre-flight for the create form. Side-effect-free; returns `{ matches[] }`. |
+
+Edits (`PATCH /bills/:id`) and submits (`POST /bills/:id/submit`) do NOT
+re-run the check. The check is a *creation*-time guard; once a bill exists
+the duplicate question becomes "should I cancel this in favor of the
+other?" — a different UX problem we leave to the user.
+
+**409 problem document** —
+
+```json
+{
+  "type": "https://billpay.local/problems/possible-duplicate",
+  "title": "Possible duplicate bill",
+  "status": 409,
+  "code": "POSSIBLE_DUPLICATE",
+  "detail": "Found N other bill(s) with the same invoice number…",
+  "instance": "/bills",
+  "matches": [
+    { "id": "…", "invoice_number": "…", "amount_cents": …, "status": "…",
+      "issue_date": "…", "due_date": "…", "vendor_id": "…",
+      "vendor_name": "…", "created_at": "…" }
+  ]
+}
+```
+
+The `matches` array is a non-standard extension to the RFC 7807 envelope
+— preserved verbatim by the web's `apiFetch` wrapper on `ApiError.body`.
+
+### 6.10.4 In-app notifications
+
+Closes the audit-log-tells-you-nothing-until-you-look gap. Notifications
+are pull, not push: bell icon in the header polls every 30s. No SMTP
+plumbing, no Slack — those remain cut.
+
+**Data model** — `Notification` table (`recipient_id`, `type`,
+`bill_id?`, `payload`, `read_at?`, `created_at`). The `recipient_id` FK
+uses `ON DELETE CASCADE` so deleting a user (which is itself disabled in
+favor of deactivation, see §6.9.6) would not strand inbox rows. `bill_id`
+is nullable for forward compatibility — today every type is bill-scoped,
+but future "your role changed" notifications won't be.
+
+**Triggers** — emitted from inside the same transaction as the underlying
+state mutation, so a rolled-back transition never produces a notification.
+
+| Type | Recipient | Triggered from |
+|---|---|---|
+| `bill_submitted` | Union of eligible approvers across pending `BillApproval` rows, minus the submitter | `bill-state.ts` `submitBill` → `notifyBillSubmitted` |
+| `bill_approved`  | Bill creator                                          | `approval-engine.ts` T6 (full approval) → `notifyBillApproved` |
+| `bill_rejected`  | Bill creator                                          | `approval-engine.ts` `rejectBill` → `notifyBillRejected` |
+| `bill_paid`      | Bill creator                                          | `bill-state.ts` `payBill` → `notifyBillPaid` |
+
+**Endpoints** —
+
+| Method | Path | Behavior |
+|---|---|---|
+| `GET` | `/notifications` | Most recent 50 for `req.user`, with denormalised `bill_summary` and a top-level `unread_count`. |
+| `POST` | `/notifications/:id/read` | Idempotent mark-read. 404 if not owned by caller (cross-user enumeration guard). |
+| `POST` | `/notifications/read-all` | Marks every unread notification for the caller as read. Returns 204. |
+
+Impersonation note: notifications scope to `req.user.id` (the **acting**
+identity), so an admin acting as Alice sees Alice's notifications. This
+matches every other auth-gated read in the codebase.
+
+### 6.10.5 Recurring bill templates
+
+A blueprint that materializes into a draft `Bill` on a fixed cadence —
+common for SaaS, rent, utilities. Manually triggered by a "Run due" button;
+no cron, no queue (consistent with §4.6 "no jobs").
+
+**Data model** — `RecurringBillTemplate` (`name`, `vendor_id`,
+`amount_cents`, `cadence ∈ {monthly, quarterly, yearly}`, `next_run_at`,
+`last_run_at?`, `line_items` (JSON), `paused_at?`, `is_active`,
+`created_by_user_id`). `line_items` is stored as JSON, not a relational
+table — a template is a blueprint, not a foreign-key target, and inlining
+keeps the row self-contained. Weekly cadence is intentionally excluded:
+real-world AP cycles are monthly+.
+
+**Cadence math** — month-end clamping. `Jan 31 + monthly` → `Feb 28/29`,
+not `Mar 3`. Implemented in `services/recurring.ts:addMonthsClamped`.
+
+**Authorization** —
+
+- Anyone authenticated can manage templates they OWN
+  (`createdByUserId == req.user.id`).
+- Admins can manage anyone's templates and materialise everyone's via
+  `run-due`. Non-admins running `run-due` only materialise their own.
+
+**Endpoints** —
+
+| Method | Path | Behavior |
+|---|---|---|
+| `GET`    | `/recurring-templates`                | List. Non-admin sees own; admin sees all. |
+| `POST`   | `/recurring-templates`                | Create. Owner is `req.user.id`. |
+| `GET`    | `/recurring-templates/:id`            | Fetch one. |
+| `PATCH`  | `/recurring-templates/:id`            | Partial update; cadence change applies from next materialization onward. |
+| `POST`   | `/recurring-templates/:id/pause`      | Set `pausedAt` (idempotent). |
+| `POST`   | `/recurring-templates/:id/resume`     | Clear `pausedAt`. |
+| `DELETE` | `/recurring-templates/:id`            | Hard delete. No FK references from materialised bills (only a `payload.from_recurring_template_id` reference in `BillEvent`). |
+| `POST`   | `/recurring-templates/run-due`        | Materialise every active, non-paused template with `next_run_at <= now()` the caller is allowed to run. Returns `{ ran: [{ template_id, template_name, bill_id, next_run_at }] }`. |
+
+**Materialisation** — each template runs in its own transaction. The
+generated bill's `invoice_number` is auto-derived from the template name
++ run date (`RC-<slug>-YYYYMMDD`); users edit it on the resulting draft.
+Issue date is `next_run_at`; due date defaults to `issue_date + 30 days`.
+The `BillEvent.payload.from_recurring_template_id` field marks the bill's
+provenance for the audit trail.
+
+### 6.10.6 Out of scope (still cut)
+
+These remained out of scope through Tier 1:
+
+- ERP / accounting sync (QuickBooks, NetSuite, Xero) — pure plumbing, low standalone signal (§3.2).
+- GL coding / chart of accounts — line items remain free-text; no spend-by-category dimension.
+- Multi-step approval graphs — rules engine is still flat-AND across matching rules; no AND/OR/sequential within a rule.
+- 1099 / tax reporting — no `is_1099_eligible` flag on Vendor; no year-end summaries.
+- Email-to-bill ingestion — no inbound mail infra.
+- Payment scheduling (`approve now, pay Friday`) — `paid` is still terminal off `approved`, no intermediate `scheduled` status.
+- Multi-currency / multi-entity — USD-only, single-org (§3.2 unchanged).
+- 2FA on login (§6.9.6 unchanged).
+
+---
+
 # 7. Acceptance Criteria
 
 ## 7.0 Preamble
