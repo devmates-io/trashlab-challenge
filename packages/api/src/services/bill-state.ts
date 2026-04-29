@@ -19,6 +19,7 @@ import type {
 import { randomBytes } from "node:crypto";
 import {
   paymentDetailsStoredSchema,
+  billCreateRequestSchema,
   type PaymentDetailsRequest,
 } from "@bill-pay/shared";
 import { prisma } from "../db.js";
@@ -139,7 +140,38 @@ export interface CreateBillInput {
   attachment_id?: string | null;
 }
 
-export async function createBill(actor: User, input: CreateBillInput) {
+// Creates a new bill in `draft` status. Defence-in-depth: re-validates inputs
+// with Zod even though the route middleware already ran, guarding against direct
+// service callers. Prisma uses parameterized queries throughout — raw SQL is
+// never constructed from user input.
+//
+// `actor` is the acting identity (impersonated user when impersonation is
+// active; else the authenticated user). `realUser` is the real session
+// owner — defaults to `actor`, set differently only by impersonation
+// sessions. The audit log uses `realUser` to inject `impersonated_by_user_id`
+// into the event payload (§6.3.7).
+export async function createBill(
+  actor: User,
+  input: CreateBillInput,
+  realUser: User = actor,
+) {
+  // Validate all inputs at the service layer as defence-in-depth — guards against
+  // callers that bypass route middleware. Prisma's query builder uses parameterized
+  // queries throughout, so ORM-level SQL injection is not a vector here.
+  const parsed = billCreateRequestSchema.safeParse(input);
+  if (!parsed.success) {
+    throw new HttpProblem({
+      status: 400,
+      code: "VALIDATION_ERROR",
+      title: "Invalid request body",
+      detail: "One or more fields failed validation. See field_issues.",
+      fieldIssues: parsed.error.issues.map((issue) => ({
+        path: issue.path.length > 0 ? issue.path.join(".") : "(root)",
+        message: issue.message,
+      })),
+    });
+  }
+
   assertLineItemSum(input.amount_cents, input.line_items);
 
   return prisma.$transaction(async (tx) => {
@@ -189,7 +221,8 @@ export async function createBill(actor: User, input: CreateBillInput) {
     await emitBillEvent(tx, {
       billId: bill.id,
       eventType: "created",
-      actorUserId: actor.id,
+      actor,
+      realUser,
       payload: {
         amount_cents: bill.amountCents,
         vendor_id: bill.vendorId,
@@ -217,10 +250,15 @@ export interface EditBillInput {
   attachment_id?: string | null;
 }
 
+// Updates a `draft` bill in place. Only the bill's creator may edit.
+// Accepts a partial patch — omitted fields are left unchanged. If `line_items`
+// is provided it replaces the full set; if only `amount_cents` changes the
+// existing line items must still sum to the new value.
 export async function editBill(
   actor: User,
   billId: string,
   input: EditBillInput,
+  realUser: User = actor,
 ) {
   return prisma.$transaction(async (tx) => {
     const bill = await tx.bill.findUnique({ where: { id: billId } });
@@ -252,6 +290,16 @@ export async function editBill(
     const nextDueDate = input.due_date
       ? fromDateString(input.due_date)
       : bill.dueDate;
+
+    if (input.amount_cents !== undefined && input.amount_cents <= 0) {
+      throw new HttpProblem({
+        status: 400,
+        code: "VALIDATION_ERROR",
+        title: "Invalid request body",
+        detail: "amount_cents must be greater than 0.",
+        fieldIssues: [{ path: "amount_cents", message: "Must be > 0" }],
+      });
+    }
 
     if (nextDueDate < nextIssueDate) {
       throw new HttpProblem({
@@ -392,7 +440,8 @@ export async function editBill(
       await emitBillEvent(tx, {
         billId: bill.id,
         eventType: "edited",
-        actorUserId: actor.id,
+        actor,
+        realUser,
         payload: {
           changed_fields: changedFields,
           previous_values: previousValues,
@@ -411,6 +460,8 @@ export async function editBill(
 // T3 — delete draft
 // ---------------------------------------------------------------------------
 
+// Hard-deletes a `draft` bill. Only the creator may delete; non-draft bills
+// must be recalled or rejected first. No audit event is emitted (§6.3.5 T3).
 export async function deleteBill(actor: User, billId: string) {
   await prisma.$transaction(async (tx) => {
     const bill = await tx.bill.findUnique({ where: { id: billId } });
@@ -441,7 +492,14 @@ export async function deleteBill(actor: User, billId: string) {
 // T4 — submit draft
 // ---------------------------------------------------------------------------
 
-export async function submitBill(actor: User, billId: string) {
+// Transitions a `draft` → `pending_approval`. Evaluates the approval rules
+// engine synchronously, creating BillApproval rows with frozen eligible-approver
+// snapshots. Validates preconditions (line items sum, vendor active, amount > 0).
+export async function submitBill(
+  actor: User,
+  billId: string,
+  realUser: User = actor,
+) {
   return prisma.$transaction(async (tx) => {
     const bill = await tx.bill.findUnique({
       where: { id: billId },
@@ -517,7 +575,8 @@ export async function submitBill(actor: User, billId: string) {
     await emitBillEvent(tx, {
       billId: bill.id,
       eventType: "submitted",
-      actorUserId: actor.id,
+      actor,
+      realUser,
       payload: {
         matched_rule_ids: approvals.map((a) => a.ruleId),
       },
@@ -535,7 +594,15 @@ export async function submitBill(actor: User, billId: string) {
 // T5/T6 — approve
 // ---------------------------------------------------------------------------
 
-export async function approveBillT5T6(actor: User, billId: string) {
+// T5: marks the actor's pending BillApproval slots as `approved`.
+// T6: fires automatically inside approveBill() when ALL slots are satisfied,
+// promoting the bill from `pending_approval` → `approved` in the same
+// transaction. Admins bypass the eligibility check (§6.3.4.1).
+export async function approveBillT5T6(
+  actor: User,
+  billId: string,
+  realUser: User = actor,
+) {
   return prisma.$transaction(async (tx) => {
     const bill = await tx.bill.findUnique({ where: { id: billId } });
     if (!bill) {
@@ -549,7 +616,7 @@ export async function approveBillT5T6(actor: User, billId: string) {
     if (bill.status !== "pending_approval") {
       illegalTransition(bill.status, "approve");
     }
-    await approveBill(tx, bill, actor);
+    await approveBill(tx, bill, actor, realUser);
 
     return tx.bill.findUniqueOrThrow({
       where: { id: bill.id },
@@ -562,10 +629,14 @@ export async function approveBillT5T6(actor: User, billId: string) {
 // T7 — reject a specific BillApproval
 // ---------------------------------------------------------------------------
 
+// Rejects a specific BillApproval row (not the bill directly). Rejection is
+// terminal — the bill moves to `rejected` and can only re-enter the workflow
+// by cloning (T10). An optional reason is recorded in the audit log.
 export async function rejectApproval(
   actor: User,
   approvalId: string,
   reason: string | null,
+  realUser: User = actor,
 ) {
   return prisma.$transaction(async (tx) => {
     const approval = await tx.billApproval.findUnique({
@@ -592,7 +663,7 @@ export async function rejectApproval(
       illegalTransition(bill.status, "reject approvals on");
     }
 
-    await rejectBill(tx, bill, actor, approvalId, reason);
+    await rejectBill(tx, bill, actor, approvalId, reason, realUser);
 
     return tx.bill.findUniqueOrThrow({
       where: { id: bill.id },
@@ -605,7 +676,14 @@ export async function rejectApproval(
 // T8 — recall
 // ---------------------------------------------------------------------------
 
-export async function recallBill(actor: User, billId: string) {
+// Returns a `pending_approval` bill to `draft`, cancelling all pending
+// BillApproval rows. Blocked once any approval has been decided — the creator
+// must wait for full rejection or contact an admin.
+export async function recallBill(
+  actor: User,
+  billId: string,
+  realUser: User = actor,
+) {
   return prisma.$transaction(async (tx) => {
     const bill = await tx.bill.findUnique({
       where: { id: billId },
@@ -657,7 +735,8 @@ export async function recallBill(actor: User, billId: string) {
     await emitBillEvent(tx, {
       billId: bill.id,
       eventType: "recalled",
-      actorUserId: actor.id,
+      actor,
+      realUser,
       payload: { cancelled_approval_count: cancelled.count },
       occurredAt: now,
     });
@@ -681,10 +760,15 @@ function idempotencyKeyFor(
   return `${idemKey}|${actorId}|${billId}`;
 }
 
+// Executes a mock payment for an `approved` bill. Snapshots the vendor's
+// payment details at settlement time (so later vendor edits don't rewrite
+// history). Supports idempotent retries via the `Idempotency-Key` header —
+// repeat calls with the same key return the original result without re-paying.
 export async function payBill(
   actor: User,
   billId: string,
   idempotencyKey: string | null,
+  realUser: User = actor,
 ) {
   // Short-circuit BEFORE the transaction when we already have a cached id.
   if (idempotencyKey) {
@@ -789,7 +873,8 @@ export async function payBill(
     await emitBillEvent(tx, {
       billId: bill.id,
       eventType: "paid",
-      actorUserId: actor.id,
+      actor,
+      realUser,
       payload,
     });
 
@@ -815,7 +900,14 @@ export async function payBill(
 // T10 — clone a rejected bill into a NEW draft
 // ---------------------------------------------------------------------------
 
-export async function cloneBill(actor: User, sourceBillId: string) {
+// Creates a new `draft` from a `rejected` bill, copying all fields and line
+// items. The cloned invoice number gets a `-CLONE-<hex>` suffix to avoid the
+// duplicate-invoice-number constraint.
+export async function cloneBill(
+  actor: User,
+  sourceBillId: string,
+  realUser: User = actor,
+) {
   return prisma.$transaction(async (tx) => {
     const source = await tx.bill.findUnique({
       where: { id: sourceBillId },
@@ -862,7 +954,8 @@ export async function cloneBill(actor: User, sourceBillId: string) {
     await emitBillEvent(tx, {
       billId: clone.id,
       eventType: "created",
-      actorUserId: actor.id,
+      actor,
+      realUser,
       payload: {
         amount_cents: clone.amountCents,
         vendor_id: clone.vendorId,

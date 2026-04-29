@@ -18,7 +18,12 @@ approvalsRouter.post(
     try {
       const body = req.body as z.infer<typeof rejectBodySchema>;
       const reason = body.reason ?? null;
-      const bill = await rejectApproval(req.user!, req.params.id, reason);
+      const bill = await rejectApproval(
+        req.user!,
+        req.params.id,
+        reason,
+        req.realUser!,
+      );
       res.json(billDetailToDto(bill));
     } catch (err) {
       next(err);

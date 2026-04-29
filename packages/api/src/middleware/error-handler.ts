@@ -16,8 +16,12 @@ function zodIssuesToFieldIssues(err: ZodError): FieldIssue[] {
 export const errorHandler: ErrorRequestHandler = (err, req: Request, res, _next) => {
   const instance = req.originalUrl;
 
-  // 1) Known HttpProblem — pass through.
+  // 1) Known HttpProblem — pass through. Log 5xx so they appear in server
+  //    output even though they're not unexpected (e.g. DB constraints).
   if (err instanceof HttpProblem) {
+    if (err.status >= 500) {
+      console.error("[http-problem 5xx]", err.status, err.code, err.detail);
+    }
     res
       .status(err.status)
       .type("application/problem+json")

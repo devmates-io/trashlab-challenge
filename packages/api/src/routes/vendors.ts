@@ -3,6 +3,7 @@ import type { Prisma } from "@prisma/client";
 import {
   vendorCreateRequestSchema,
   vendorPatchRequestSchema,
+  paymentDetailsStoredSchema,
 } from "@bill-pay/shared";
 import { prisma } from "../db.js";
 import { HttpProblem } from "../lib/problem.js";
@@ -30,12 +31,40 @@ vendorsRouter.post(
   async (req, res, next) => {
     try {
       const body = req.body as typeof vendorCreateRequestSchema._output;
+
+      const name = body.name.trim();
+      if (name.length === 0) {
+        throw new HttpProblem({
+          status: 400,
+          code: "VALIDATION_ERROR",
+          title: "Invalid request body",
+          detail: "One or more fields failed validation. See field_issues.",
+          fieldIssues: [{ path: "name", message: "Name cannot be blank" }],
+        });
+      }
+
+      const detailsResult = paymentDetailsStoredSchema.safeParse(body.payment_details);
+      if (!detailsResult.success) {
+        throw new HttpProblem({
+          status: 400,
+          code: "VALIDATION_ERROR",
+          title: "Invalid request body",
+          detail: "One or more fields failed validation. See field_issues.",
+          fieldIssues: detailsResult.error.issues.map((issue) => ({
+            path: issue.path.length > 0
+              ? `payment_details.${issue.path.join(".")}`
+              : "payment_details",
+            message: issue.message,
+          })),
+        });
+      }
+
       const v = await prisma.vendor.create({
         data: {
-          name: body.name,
+          name,
           contactEmail: body.contact_email ?? null,
           paymentMethod: body.payment_method,
-          paymentDetails: body.payment_details as unknown as Prisma.InputJsonValue,
+          paymentDetails: detailsResult.data as unknown as Prisma.InputJsonValue,
           isActive: true,
         },
       });

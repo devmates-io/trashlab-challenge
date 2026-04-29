@@ -159,11 +159,15 @@ export async function isAdminOverride(
 // Emits one "approved" per-approval event per decided slot, and (if the bill
 // fully approves) one additional bill-level "approved" event (§6.3.5 T6).
 // Throws NOT_ELIGIBLE_APPROVER / SELF_APPROVAL_FORBIDDEN per §6.3.4 / §6.3.4.1.
+//
+// `realUser` (defaults to `actingUser`) lets the audit log record the
+// REAL admin behind an impersonation session — see services/audit-log.ts.
 // ---------------------------------------------------------------------------
 export async function approveBill(
   tx: Prisma.TransactionClient,
   bill: Bill,
   actingUser: User,
+  realUser: User = actingUser,
 ): Promise<void> {
   const pending = await tx.billApproval.findMany({
     where: { billId: bill.id, status: "pending" },
@@ -216,7 +220,8 @@ export async function approveBill(
     await emitBillEvent(tx, {
       billId: bill.id,
       eventType: "approved",
-      actorUserId: actingUser.id,
+      actor: actingUser,
+      realUser,
       payload,
       occurredAt: now,
     });
@@ -234,7 +239,8 @@ export async function approveBill(
     await emitBillEvent(tx, {
       billId: bill.id,
       eventType: "approved",
-      actorUserId: actingUser.id,
+      actor: actingUser,
+      realUser,
       payload: {
         rule_id: null,
         approval_id: null,
@@ -251,6 +257,9 @@ export async function approveBill(
 // ---------------------------------------------------------------------------
 // §6.4.5 — rejectBill: one rejection fails the whole bill; cascade other
 // pending approvals to cancelled (silently, no events).
+//
+// `realUser` (defaults to `actingUser`) lets the audit log record the
+// REAL admin behind an impersonation session — see services/audit-log.ts.
 // ---------------------------------------------------------------------------
 export async function rejectBill(
   tx: Prisma.TransactionClient,
@@ -258,6 +267,7 @@ export async function rejectBill(
   actingUser: User,
   targetApprovalId: string,
   reason: string | null,
+  realUser: User = actingUser,
 ): Promise<void> {
   const target = await tx.billApproval.findUnique({
     where: { id: targetApprovalId },
@@ -336,7 +346,8 @@ export async function rejectBill(
   await emitBillEvent(tx, {
     billId: bill.id,
     eventType: "rejected",
-    actorUserId: actingUser.id,
+    actor: actingUser,
+    realUser,
     payload,
     occurredAt: now,
   });

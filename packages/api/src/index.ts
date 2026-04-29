@@ -4,6 +4,10 @@ import { currentUser } from "./middleware/current-user.js";
 import { errorHandler } from "./middleware/error-handler.js";
 import { approvalRulesRouter } from "./routes/approval-rules.js";
 import { approvalsRouter } from "./routes/approvals.js";
+import {
+  authProtectedRouter,
+  authPublicRouter,
+} from "./routes/auth.js";
 import { billsRouter } from "./routes/bills.js";
 import { dashboardRouter } from "./routes/dashboard.js";
 import { healthRouter } from "./routes/health.js";
@@ -17,13 +21,17 @@ const app = express();
 app.use(cors({ origin: "*" }));
 app.use(express.json({ limit: "1mb" }));
 
-// Health MUST be mounted before the current-user middleware so it's reachable
-// without the X-User-Id header.
+// Health and the public auth surface (POST /auth/login) MUST be mounted
+// before the currentUser middleware — the whole point of login is that
+// the caller does not yet have a bearer token.
 app.use(healthRouter);
+app.use(authPublicRouter);
 
-// All subsequent routes require a valid X-User-Id.
+// All subsequent routes require a valid Authorization: Bearer <token>
+// resolving to a non-expired Session row.
 app.use(currentUser);
 
+app.use(authProtectedRouter);
 app.use(usersRouter);
 app.use(vendorsRouter);
 app.use(billsRouter);
