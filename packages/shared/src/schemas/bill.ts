@@ -75,3 +75,36 @@ export const billListQuerySchema = z.object({
   status: z.enum(BILL_STATUS_VALUES).optional(),
 });
 export type BillListQuery = z.infer<typeof billListQuerySchema>;
+
+// ---- §6.10.3 — duplicate detection ----
+
+// Embedded in the 409 POSSIBLE_DUPLICATE problem document and returned by
+// GET /bills/check-duplicate. One row per matching bill (most recent first,
+// capped at 5 server-side). The vendor name is denormalized so the UI can
+// render the dialog without a second fetch.
+export const possibleDuplicateMatchSchema = z.object({
+  id: cuidSchema,
+  invoice_number: z.string(),
+  amount_cents: positiveMoneyCentsSchema,
+  status: z.enum(BILL_STATUS_VALUES),
+  issue_date: isoDateStringSchema,
+  due_date: isoDateStringSchema,
+  vendor_id: cuidSchema,
+  vendor_name: z.string(),
+  created_at: isoDateTimeStringSchema,
+});
+export type PossibleDuplicateMatch = z.infer<typeof possibleDuplicateMatchSchema>;
+
+// GET /bills/check-duplicate?vendor_id=…&invoice_number=… — pre-flight for
+// the create form so we can warn before submission. Body parameters mirror
+// the create-bill fields that the duplicate query keys off.
+export const checkDuplicateQuerySchema = z.object({
+  vendor_id: cuidSchema,
+  invoice_number: z.string().min(1).max(50),
+});
+export type CheckDuplicateQuery = z.infer<typeof checkDuplicateQuerySchema>;
+
+export const checkDuplicateResponseSchema = z.object({
+  matches: z.array(possibleDuplicateMatchSchema),
+});
+export type CheckDuplicateResponse = z.infer<typeof checkDuplicateResponseSchema>;

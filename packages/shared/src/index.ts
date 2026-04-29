@@ -6,3 +6,7 @@ export * from "./schemas/vendor.js";
 export * from "./schemas/bill.js";
 export * from "./schemas/approval-rule.js";
 export * from "./schemas/payment.js";
+export * from "./schemas/ocr.js";
+export * from "./schemas/bulk.js";
+export * from "./schemas/notification.js";
+export * from "./schemas/recurring.js";

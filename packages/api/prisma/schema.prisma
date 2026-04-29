@@ -63,6 +63,25 @@ enum BillEventType {
   edited
 }
 
+// §6.10.4 — notification subjects. Each value corresponds to a state
+// transition in the bill state machine that produces a pull signal for
+// either the bill creator or the eligible approver pool.
+enum NotificationType {
+  bill_submitted
+  bill_approved
+  bill_rejected
+  bill_paid
+}
+
+// §6.10.5 — recurring bill template cadence. Weekly is intentionally
+// excluded: real-world AP bills (rent, SaaS, utilities) cycle on these
+// three; weekly cadence creates noise without product value.
+enum RecurringCadence {
+  monthly
+  quarterly
+  yearly
+}
+
 // ---------------------------------------------------------------------------
 // User — §6.2.3
 // ---------------------------------------------------------------------------
@@ -78,13 +97,15 @@ model User {
   createdAt              DateTime @default(now()) @map("created_at")
   updatedAt              DateTime @updatedAt @map("updated_at")
 
-  billsCreated         Bill[]         @relation("BillCreator")
-  approvalsDecided     BillApproval[] @relation("ApprovalDecider")
-  paymentsInitiated    Payment[]      @relation("PaymentInitiator")
-  billEventsActor      BillEvent[]    @relation("BillEventActor")
-  attachmentsUploaded  Attachment[]   @relation("AttachmentUploader")
-  sessions             Session[]      @relation("SessionUser")
-  sessionsImpersonated Session[]      @relation("SessionImpersonatedUser")
+  billsCreated         Bill[]                  @relation("BillCreator")
+  approvalsDecided     BillApproval[]          @relation("ApprovalDecider")
+  paymentsInitiated    Payment[]               @relation("PaymentInitiator")
+  billEventsActor      BillEvent[]             @relation("BillEventActor")
+  attachmentsUploaded  Attachment[]            @relation("AttachmentUploader")
+  sessions             Session[]               @relation("SessionUser")
+  sessionsImpersonated Session[]               @relation("SessionImpersonatedUser")
+  notifications        Notification[]          @relation("NotificationRecipient")
+  recurringTemplates   RecurringBillTemplate[] @relation("RecurringTemplateCreator")
 
   @@map("users")
 }
@@ -133,7 +154,8 @@ model Vendor {
   createdAt      DateTime      @default(now()) @map("created_at")
   updatedAt      DateTime      @updatedAt @map("updated_at")
 
-  bills Bill[]
+  bills              Bill[]
+  recurringTemplates RecurringBillTemplate[]
 
   @@map("vendors")
 }
@@ -156,13 +178,14 @@ model Bill {
   createdAt       DateTime   @default(now()) @map("created_at")
   updatedAt       DateTime   @updatedAt @map("updated_at")
 
-  vendor     Vendor         @relation(fields: [vendorId], references: [id], onDelete: Restrict)
-  creator    User           @relation("BillCreator", fields: [createdByUserId], references: [id], onDelete: Restrict)
-  lineItems  BillLineItem[]
-  attachment Attachment?
-  approvals  BillApproval[]
-  payment    Payment?
-  events     BillEvent[]
+  vendor       Vendor         @relation(fields: [vendorId], references: [id], onDelete: Restrict)
+  creator      User           @relation("BillCreator", fields: [createdByUserId], references: [id], onDelete: Restrict)
+  lineItems    BillLineItem[]
+  attachment   Attachment?
+  approvals    BillApproval[]
+  payment      Payment?
+  events       BillEvent[]
+  Notification Notification[]
 
   @@index([status, dueDate], map: "bills_status_due_date_idx")
   @@index([createdByUserId], map: "bills_created_by_user_id_idx")
@@ -286,4 +309,75 @@ model BillEvent {
 
   @@index([billId, occurredAt(sort: Desc)], map: "bill_events_bill_id_occurred_at_idx")
   @@map("bill_events")
+}
+
+// ---------------------------------------------------------------------------
+// Notification — §6.10.4
+//
+// In-app pull signal generated when a bill state transition produces work
+// or a status change for a user. The payload mirrors the convention used
+// by `BillEvent.payload`: arbitrary JSON whose shape is determined by the
+// `type`. Read state is tracked with a nullable `read_at` timestamp so we
+// don't lose ordering information (vs. a boolean).
+//
+// `bill` is nullable because future notification types may not be tied to
+// a specific bill (e.g., "your role was changed"). Today every type is bill-
+// scoped — the column is nullable as forward compatibility, not because we
+// emit null-bill rows.
+// ---------------------------------------------------------------------------
+
+model Notification {
+  id          String           @id @default(cuid())
+  recipientId String           @map("recipient_id")
+  type        NotificationType
+  billId      String?          @map("bill_id")
+  payload     Json             @default("{}")
+  readAt      DateTime?        @map("read_at")
+  createdAt   DateTime         @default(now()) @map("created_at")
+
+  recipient User  @relation("NotificationRecipient", fields: [recipientId], references: [id], onDelete: Cascade)
+  bill      Bill? @relation(fields: [billId], references: [id], onDelete: Cascade)
+
+  @@index([recipientId, readAt, createdAt(sort: Desc)], map: "notifications_recipient_unread_idx")
+  @@map("notifications")
+}
+
+// ---------------------------------------------------------------------------
+// RecurringBillTemplate — §6.10.5
+//
+// A blueprint a user creates once that materializes into draft Bills on a
+// fixed cadence. The line items are stored as a JSON snapshot (not
+// relational rows) because they're a template — there is no edit history,
+// no FKs reference them, and inlining them keeps each template a single row.
+//
+// `nextRunAt` advances by `cadence` every time the materializer runs; we
+// store it as DateTime UTC midnight (not Date-only) so cadence math is
+// unambiguous around DST and timezone boundaries.
+//
+// `pausedAt` and `isActive` are intentionally separate: `isActive=false`
+// soft-deletes a template (kept for audit / FK), while `pausedAt` is a
+// reversible "skip me on the next run" toggle the user can flip in the UI.
+// ---------------------------------------------------------------------------
+
+model RecurringBillTemplate {
+  id              String           @id @default(cuid())
+  name            String
+  vendorId        String           @map("vendor_id")
+  amountCents     Int              @map("amount_cents")
+  cadence         RecurringCadence
+  nextRunAt       DateTime         @map("next_run_at")
+  lastRunAt       DateTime?        @map("last_run_at")
+  lineItems       Json             @default("[]") @map("line_items")
+  pausedAt        DateTime?        @map("paused_at")
+  isActive        Boolean          @default(true) @map("is_active")
+  createdByUserId String           @map("created_by_user_id")
+  createdAt       DateTime         @default(now()) @map("created_at")
+  updatedAt       DateTime         @updatedAt @map("updated_at")
+
+  vendor  Vendor @relation(fields: [vendorId], references: [id], onDelete: Restrict)
+  creator User   @relation("RecurringTemplateCreator", fields: [createdByUserId], references: [id], onDelete: Restrict)
+
+  @@index([nextRunAt, isActive], map: "recurring_templates_due_idx")
+  @@index([createdByUserId], map: "recurring_templates_creator_idx")
+  @@map("recurring_bill_templates")
 }
