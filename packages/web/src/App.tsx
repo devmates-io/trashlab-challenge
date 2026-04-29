@@ -6,9 +6,10 @@ import {
 } from "react-router-dom";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { queryClient } from "@/lib/query-client";
-import { Layout, type RouteHandle } from "@/components/layout";
+import { Layout, RequireAdmin, type RouteHandle } from "@/components/layout";
 import { Toaster } from "@/components/ui/sonner";
 
+import LoginPage from "@/pages/login";
 import DashboardPage from "@/pages/dashboard";
 import BillsListPage from "@/pages/bills/list";
 import BillCreatePage from "@/pages/bills/new";
@@ -19,11 +20,22 @@ import VendorCreatePage from "@/pages/vendors/new";
 import VendorEditPage from "@/pages/vendors/edit";
 import VendorDetailPage from "@/pages/vendors/detail";
 import ApprovalRulesPage from "@/pages/approval-rules/list";
+// Admin user-management pages (Package D, concurrent). Imported as if they
+// already exist; the build will fail to typecheck until D's files land.
+// That's expected during parallel execution.
+import UsersListPage from "@/pages/users/list";
+import UserCreatePage from "@/pages/users/new";
+import UserEditPage from "@/pages/users/edit";
 import NotFoundPage from "@/pages/not-found";
 
 const handle = (title: string): RouteHandle => ({ title });
 
 const router = createBrowserRouter([
+  // /login renders OUTSIDE Layout so it isn't itself auth-guarded.
+  {
+    path: "login",
+    element: <LoginPage />,
+  },
   {
     element: <Layout />,
     children: [
@@ -76,6 +88,29 @@ const router = createBrowserRouter([
         path: "approval-rules",
         element: <ApprovalRulesPage />,
         handle: handle("Approval rules"),
+      },
+      // Admin-only branch. RequireAdmin wraps the user-management routes so
+      // a non-admin landing on /users via direct URL is sent back to /
+      // (rather than seeing the page chrome and a generic 403 toast).
+      {
+        element: <RequireAdmin />,
+        children: [
+          {
+            path: "users",
+            element: <UsersListPage />,
+            handle: handle("Users"),
+          },
+          {
+            path: "users/new",
+            element: <UserCreatePage />,
+            handle: handle("New user"),
+          },
+          {
+            path: "users/:id/edit",
+            element: <UserEditPage />,
+            handle: handle("Edit user"),
+          },
+        ],
       },
       { path: "*", element: <NotFoundPage /> },
     ],

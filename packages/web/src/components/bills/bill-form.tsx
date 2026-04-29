@@ -421,15 +421,22 @@ export function BillForm({
               onValueChange={(v) =>
                 setValue("vendor_id", v, { shouldValidate: true })
               }
-              disabled={isBusy || vendorsQuery.isLoading}
+              disabled={isBusy || vendorsQuery.isLoading || vendorsQuery.isError}
             >
               <SelectTrigger
                 id="vendor"
-                className={cn(errors.vendor_id && "border-destructive")}
+                className={cn(
+                  errors.vendor_id && "border-destructive",
+                  vendorsQuery.isError && "border-destructive",
+                )}
               >
                 <SelectValue
                   placeholder={
-                    vendorsQuery.isLoading ? "Loading vendors…" : "Select a vendor"
+                    vendorsQuery.isLoading
+                      ? "Loading vendors…"
+                      : vendorsQuery.isError
+                        ? "Failed to load vendors"
+                        : "Select a vendor"
                   }
                 />
               </SelectTrigger>
@@ -446,7 +453,12 @@ export function BillForm({
                 ))}
               </SelectContent>
             </Select>
-            {errors.vendor_id && (
+            {vendorsQuery.isError && (
+              <p className="text-sm font-medium text-destructive">
+                Could not load vendors. Please refresh and try again.
+              </p>
+            )}
+            {!vendorsQuery.isError && errors.vendor_id && (
               <p className="text-sm font-medium text-destructive">
                 {errors.vendor_id.message as string}
               </p>
