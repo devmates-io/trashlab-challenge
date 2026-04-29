@@ -105,7 +105,7 @@ implementer does not spend cycles re-deciding.
 
 | Topic | Resolution | Authoritative section |
 |---|---|---|
-| Authentication model | Hardcoded user switcher, 4 seeded users (including admin for §6.3.4.1) | §6.1 |
+| Authentication model | Email + bcrypt password login → opaque server-side session token sent as `Authorization: Bearer …`. Admin-only user CRUD; admin "login as" impersonation. 4 seeded users (including admin for §6.3.4.1). | §6.9 |
 | Approver model | Per-user approval limits | §6.4 |
 | Payment methods | `ach`, `check`, `wire`, `card` | §6.2, §6.7 |
 | Invoice attachments | Local-disk file upload, no OCR | §6.2, §6.6 |
@@ -444,9 +444,17 @@ implementing agent must not infer or add them, even if they seem like
 - There is **no** bill edit history / version log.
 
 ### Auth & multi-tenancy
-- There is **no** login, no password, no session. The user switcher is a dropdown, not an auth flow.
+
+> **Superseded in part by §6.9** (Authentication, sessions, and user management).
+> Email + password login, server-side opaque session tokens, admin-only user CRUD, and
+> admin "login as another user" impersonation are now **in scope**. The original
+> "no login / no password / no session / no runtime user creation" cuts are reversed —
+> see §6.9 for the authoritative model. The bullets below capture what remains cut.
+
+- ~~There is **no** login, no password, no session. The user switcher is a dropdown, not an auth flow.~~ Superseded by §6.9.
 - There is **no** multi-tenancy. All users, vendors, bills, and rules live in a single org.
-- Switching users does **not** enforce any permission boundary beyond what §6.4 rules specify. All users can view all data.
+- There is **no** self-signup, password-reset, email-verification, MFA, or cross-device session listing flow (§6.9 cuts these explicitly).
+- Authenticated users can still view all data inside the single org (no per-row access control beyond approval-eligibility checks specified in §6.3.4 / §6.4).
 
 ### Reporting & export
 - There is **no** CSV export, no report generation, no 1099 tax workflow.
@@ -527,9 +535,11 @@ bill-pay-mvp/
 │   │       ├── index.ts               # Express entrypoint
 │   │       ├── db.ts                  # Prisma client singleton
 │   │       ├── middleware/
-│   │       │   ├── current-user.ts    # reads X-User-Id header, injects req.user
+│   │       │   ├── current-user.ts    # reads `Authorization: Bearer <token>`, loads Session, injects req.realUser + req.user (see §6.9)
 │   │       │   ├── error-handler.ts
 │   │       │   └── validate.ts        # zod validation helper
+│   │       ├── lib/
+│   │       │   └── auth.ts            # session-token generation, bcrypt helpers (§6.9)
 │   │       ├── routes/
 │   │       │   ├── vendors.ts
 │   │       │   ├── bills.ts
@@ -554,20 +564,25 @@ bill-pay-mvp/
 │           ├── main.tsx
 │           ├── App.tsx                # router + layout
 │           ├── lib/
-│           │   ├── api.ts             # fetch wrapper; injects X-User-Id header
+│           │   ├── api.ts             # fetch wrapper; injects `Authorization: Bearer <token>` from session store; on 401 clears token and redirects to /login (§6.9)
+│           │   ├── auth-store.ts      # in-memory + localStorage session token store (§6.9)
 │           │   ├── query-client.ts    # React Query config
 │           │   └── format.ts          # formatMoney, formatDate (§4.4 Q-4/Q-5)
 │           ├── components/
 │           │   ├── ui/                # shadcn/ui components (generated)
-│           │   ├── user-switcher.tsx
+│           │   ├── impersonation-switcher.tsx  # admin-only "Login as" dropdown (§6.9)
+│           │   ├── impersonation-banner.tsx    # high-contrast strip while impersonating (§6.9)
 │           │   └── ...
 │           ├── pages/
+│           │   ├── login.tsx          # /login (§6.9)
 │           │   ├── dashboard.tsx
 │           │   ├── vendors/
 │           │   ├── bills/
-│           │   └── rules/
+│           │   ├── rules/
+│           │   └── users/             # admin-only list / new / edit (§6.9)
 │           └── hooks/
-│               └── use-current-user.ts
+│               ├── use-current-user.ts
+│               └── use-session.ts     # SessionDTO + login/logout/impersonate helpers (§6.9)
 ```
 
 ### 6.1.3 Workspace & scripts
@@ -626,13 +641,19 @@ Environment variables (documented in `.env.example` — O-3 in §4.5):
 | `VITE_API_URL` | `http://localhost:4000` | web (dev only) |
 | `SEED_ON_EMPTY` | `true` | api (guards automatic seeding) |
 
-### 6.1.6 Local-only current-user header
+### 6.1.6 Authentication header (superseded — see §6.9)
 
-Since auth is out of scope (§4.6), the frontend sends the selected user ID in
-an `X-User-Id` header on every API call. The `current-user` middleware on the
-API reads this header, loads the user from the DB, and attaches them to
-`req.user`. If the header is missing or the user doesn't exist, the API
-returns 401. This is local-only — any deployed build must remove it.
+> **Superseded by §6.9.** This section originally specified an unauthenticated
+> `X-User-Id: <user.id>` request header chosen because auth was cut from the
+> MVP. That cut has been reversed: the system now uses email + bcrypt password
+> login, and every authenticated request sends `Authorization: Bearer <token>`
+> where `<token>` is an opaque server-side session token. See §6.9 for the
+> middleware contract, `req.realUser` / `req.user` semantics, and the
+> impersonation model that piggybacks on the same session row.
+
+The original `X-User-Id` middleware no longer exists. Any reference to it
+elsewhere in this document is either annotated as superseded or describes
+historical scope (e.g., the original §11 work plan).
 
 ### 6.1.7 Project structure diagram
 
@@ -650,7 +671,7 @@ flowchart LR
     end
 
     browser -- HTTP --> web
-    browser -- "HTTP / X-User-Id" --> api
+    browser -- "HTTP / Authorization: Bearer &lt;token&gt;" --> api
     api -- "Prisma" --> db
     api -- "multer" --> uploads
     web -. "imports @bill-pay/shared types/zod" .-> api
@@ -658,7 +679,7 @@ flowchart LR
 
 ### 6.1.8 Things the agent must NOT add
 
-- No authentication middleware beyond the `X-User-Id` header reader.
+- No authentication beyond the email + password + opaque server-side session token model specified in §6.9 (no JWT, no cookie sessions, no OAuth, no SSO, no MFA, no password-reset, no email verification).
 - No Redis, no BullMQ, no queue, no cache layer.
 - No Storybook, no Chromatic, no visual testing.
 - No GraphQL layer on top of REST.
@@ -681,7 +702,8 @@ to hide them from the new-bill vendor picker without affecting existing bills.
 
 | Entity | Purpose | Cardinality notes |
 |---|---|---|
-| `User` | Submitters, approvers, admin. Drives user switcher, approval eligibility, audit actor. | 3 seeded (§6.8); no runtime creation in MVP |
+| `User` | Submitters, approvers, admin. Login identity, approval eligibility, audit actor. | 4 seeded (§6.8); admin-only runtime creation/edit/(de)activation per §6.9. No hard delete (FK Restrict from many tables — §6.2.7) |
+| `Session` | Server-side authentication session. PK is the opaque bearer token; carries the real user FK and an optional `impersonated_user_id` FK. | Created at `POST /auth/login`; deleted at logout / target-user deactivation. See §6.2.3 / §6.9 |
 | `Vendor` | The payee. Holds payment-method-specific details as JSONB. | 8–10 seeded; user can create/edit |
 | `Bill` | Core entity. Status + amount + vendor + creator. | Many per vendor |
 | `BillLineItem` | Line-item breakdown. `sum(line_items.amount_cents) = bill.amount_cents` enforced at API layer. | 1..N per bill |
@@ -712,14 +734,42 @@ All enums live in `packages/shared/src/enums.ts` and in `schema.prisma`.
 |---|---|---|---|
 | `id` | `String` | PK, CUID | |
 | `name` | `String` | NOT NULL | Human-readable display name, e.g. "Alice Submitter" |
-| `email` | `String?` | nullable, unique if present | No auth; email is cosmetic |
-| `role` | `UserRole` | NOT NULL | Drives admin-override authorization per §6.3.4.1 (approve / reject / pay). Otherwise organizational only — `submitter` and `approver` are cosmetic labels, as authorization is driven by `max_approval_amount_cents` and `BillApproval.eligible_approver_user_ids` |
+| `email` | `String` | NOT NULL, `@unique` | Login identifier (§6.9). Required and unique across users. Case-insensitively matched at login (§6.9.5) |
+| `password_hash` | `String?` | nullable in column | bcrypt-hashed (cost 10) per §6.9. The seed populates this for all four demo users; `POST /users` (§6.9.3) requires a plaintext `password` in the request body and hashes it before persistence. The column is nullable so the seed can defensively pre-create users with no credential, but in practice every runtime user has a hash. **Never** serialised in any DTO |
+| `role` | `UserRole` | NOT NULL | Drives admin-override authorization per §6.3.4.1 (approve / reject / pay) and admin-only user-CRUD gates per §6.9.3. Otherwise organizational only — `submitter` and `approver` are cosmetic labels, as approval authorization is driven by `max_approval_amount_cents` and `BillApproval.eligible_approver_user_ids` |
 | `max_approval_amount_cents` | `Int` | NOT NULL, `>= 0`, default `0` | Per-user limit (Q11). `0` means cannot approve anything |
-| `is_active` | `Boolean` | default `true` | |
+| `is_active` | `Boolean` | default `true` | Inactive users cannot authenticate (`INVALID_CREDENTIALS` at login; `USER_INACTIVE` mid-session per §6.9.2) |
 | `created_at` | `DateTime` | NOT NULL, default `now()` | |
 | `updated_at` | `DateTime` | NOT NULL, `@updatedAt` | |
 
-Relations: `bills_created` (1..N to `Bill.created_by_user_id`); `approvals_decided` (1..N to `BillApproval.decided_by_user_id`); `payments_initiated` (1..N to `Payment.initiated_by_user_id`); `bill_events_actor` (1..N to `BillEvent.actor_user_id`); `attachments_uploaded` (1..N to `Attachment.uploaded_by_user_id`).
+Relations: `bills_created` (1..N to `Bill.created_by_user_id`); `approvals_decided` (1..N to `BillApproval.decided_by_user_id`); `payments_initiated` (1..N to `Payment.initiated_by_user_id`); `bill_events_actor` (1..N to `BillEvent.actor_user_id`); `attachments_uploaded` (1..N to `Attachment.uploaded_by_user_id`); `sessions` (1..N to `Session.user_id`); `sessions_impersonated` (1..N to `Session.impersonated_user_id`).
+
+#### `Session`
+
+Server-side authentication session. The token (PK) is the opaque bearer
+sent in `Authorization: Bearer <token>` on every authenticated request;
+the row is looked up by exact match. See §6.9 for the full auth model.
+
+| Field | Type | Constraints | Notes |
+|---|---|---|---|
+| `token` | `String` | PK (no `@map` — the column is also `token`) | Opaque bearer token. ≥ 32 random bytes hex-encoded (64 hex chars), generated server-side by `crypto.randomBytes` at `POST /auth/login` (§6.9.5) |
+| `user_id` | `String` | FK → `users.id`, `onDelete: Restrict` | The real authenticated owner — the user whose password unlocked this session. `req.realUser` resolves from this column (§6.9.2) |
+| `impersonated_user_id` | `String?` | nullable FK → `users.id`, `onDelete: Restrict` | NULL = not impersonating. Set when an admin is acting as another user via `POST /auth/impersonate/:userId`; cleared by `POST /auth/stop-impersonating` (§6.9.4). The impersonated user's row also resolves to `req.user` (the acting identity) |
+| `expires_at` | `DateTime` | NOT NULL | TTL is picked at mint time; default 7 days from `now()` (§6.9.5). Sessions past their expiry are rejected with 401 `UNAUTHORIZED` and deleted best-effort by the middleware |
+| `created_at` | `DateTime` | NOT NULL, default `now()` | |
+
+Indexes:
+- PK on `token` (the lookup column on every authenticated request).
+- `sessions_user_id_idx` on `user_id` for the "delete all of this user's sessions" sweep performed on deactivation (§6.9.1) and on admin-driven `is_active` flips.
+
+Relations: `user` (N..1 `User` via `user_id`); `impersonated_user` (N..1 `User` via `impersonated_user_id`).
+
+Cascade behavior: both FKs use `onDelete: Restrict`. Sessions must be
+deleted explicitly before the underlying `User` row could be removed. User
+hard-delete is not a runtime operation in MVP (§6.2.7, §6.9.6) so this
+is primarily defence-in-depth — but it also means deactivation handlers
+must `prisma.session.deleteMany` *before* flipping `User.is_active` if
+they want the auth middleware to never observe a half-applied state.
 
 #### `Vendor`
 
@@ -885,6 +935,8 @@ erDiagram
     USER ||--o{ PAYMENT : "initiates"
     USER ||--o{ BILL_EVENT : "actor of"
     USER ||--o{ ATTACHMENT : "uploads"
+    USER ||--o{ SESSION : "owns"
+    USER ||--o{ SESSION : "impersonated by"
 
     VENDOR ||--o{ BILL : "has"
 
@@ -899,10 +951,19 @@ erDiagram
     USER {
         string id PK
         string name
-        string email "nullable"
+        string email "unique"
+        string password_hash "nullable, bcrypt"
         enum role
         int max_approval_amount_cents
         bool is_active
+    }
+
+    SESSION {
+        string token PK
+        string user_id FK
+        string impersonated_user_id FK "nullable"
+        datetime expires_at
+        datetime created_at
     }
 
     VENDOR {
@@ -1025,6 +1086,8 @@ zod `discriminatedUnion('method', [...])`. API and web both import it.
 | `User` | `Payment.initiated_by_user_id` | `Restrict` | Same |
 | `User` | `Attachment.uploaded_by_user_id` | `Restrict` | Same |
 | `User` | `BillEvent.actor_user_id` | `Restrict` | Same |
+| `User` | `Session.user_id` | `Restrict` | Sessions must be revoked (`prisma.session.deleteMany`) before the owning user could be deleted (§6.9.1). Hard user-delete is not a runtime operation, so this is defence-in-depth |
+| `User` | `Session.impersonated_user_id` | `Restrict` | Same — an in-flight impersonation row blocks the impersonated user's deletion. The deactivation handlers (§6.9.1) sweep both FK directions explicitly so this restrict never surfaces in normal use |
 | `Vendor` | `Bill.vendor_id` | `Restrict` | Deferred-decision resolution from §2.3 |
 | `Bill` | `BillLineItem.bill_id` | `Cascade` | Line items have no independent meaning |
 | `Bill` | `Attachment.bill_id` | `Cascade` | File record deleted with bill (physical file cleanup is best-effort in MVP) |
@@ -1036,6 +1099,13 @@ zod `discriminatedUnion('method', [...])`. API and web both import it.
 **Explicit MVP behavior on rule deletion**: the API rejects `DELETE` on a rule
 if any `BillApproval` references it, returning 409 with a hint to deactivate
 instead. See §6.5 API contracts.
+
+**Explicit MVP behavior on user deletion**: there is no `DELETE /users/:id`
+endpoint. The FK Restrict relations above (six tables, including `Session`
+in both directions) make hard-delete impractical, and the demo flow does
+not need it. `POST /users/:id/deactivate` is the supported retirement path
+— it sets `is_active = false` and revokes every `Session` row owned by or
+impersonating the target (§6.9.1).
 
 ### 6.2.8 Known redundancies and why they're intentional
 
@@ -1125,19 +1195,30 @@ stateDiagram-v2
 
 ### 6.3.4 Authorization rules per transition
 
-All authorization checks happen at the API layer using the `X-User-Id` header
-(§6.1.6) to resolve the current user.
+All authorization checks happen at the API layer. The `current-user`
+middleware (§6.9.2) resolves the bearer token from the
+`Authorization: Bearer <token>` header into `req.realUser` (the session
+owner) and `req.user` (the **acting** identity — the impersonated user
+when impersonation is active, otherwise the same as `req.realUser`). The
+table below evaluates against `req.user`; admin-override (§6.3.4.1) is
+therefore unavailable while impersonating a non-admin.
 
 | Transition | Authorization rule | HTTP error on failure |
 |---|---|---|
 | T1 (create) | User exists and is active | 401 if header missing; 403 if user inactive |
-| T2 (edit) | `current_user.id == bill.created_by_user_id` | 403 `NOT_BILL_CREATOR` |
-| T3 (delete) | `current_user.id == bill.created_by_user_id` AND `bill.status == draft` | 403 `NOT_BILL_CREATOR` or 409 `ILLEGAL_TRANSITION` |
-| T4 (submit) | `current_user.id == bill.created_by_user_id` AND `bill.status == draft` AND submission precondition checks pass (see §6.3.5) | 403, 409, or 400 `SUBMISSION_PRECONDITION_FAILED` |
-| T5/T7 (approve / reject) | `current_user.id ∈ approval.eligible_approver_user_ids` AND `approval.status == pending` AND `bill.status == pending_approval` AND (`current_user.id != bill.created_by_user_id` OR `current_user.role == admin`) | 403 `NOT_ELIGIBLE_APPROVER`, 403 `SELF_APPROVAL_FORBIDDEN`, 409 `ALREADY_DECIDED`/`ILLEGAL_TRANSITION` |
-| T8 (recall) | `current_user.id == bill.created_by_user_id` AND `bill.status == pending_approval` AND every `BillApproval.status == pending` | 403 `NOT_BILL_CREATOR` or 409 `CANNOT_RECALL_AFTER_DECISION` |
-| T9 (pay) | (`current_user.max_approval_amount_cents >= bill.amount_cents` OR `current_user.role == admin`) AND `current_user.is_active` AND `bill.status == approved` | 403 `INSUFFICIENT_PAY_AUTHORITY` or 409 `ILLEGAL_TRANSITION` |
+| T2 (edit) | `req.user.id == bill.created_by_user_id` | 403 `NOT_BILL_CREATOR` |
+| T3 (delete) | `req.user.id == bill.created_by_user_id` AND `bill.status == draft` | 403 `NOT_BILL_CREATOR` or 409 `ILLEGAL_TRANSITION` |
+| T4 (submit) | `req.user.id == bill.created_by_user_id` AND `bill.status == draft` AND submission precondition checks pass (see §6.3.5) | 403, 409, or 400 `SUBMISSION_PRECONDITION_FAILED` |
+| T5/T7 (approve / reject) | `req.user.id ∈ approval.eligible_approver_user_ids` AND `approval.status == pending` AND `bill.status == pending_approval` AND (`req.user.id != bill.created_by_user_id` OR `req.user.role == admin`) | 403 `NOT_ELIGIBLE_APPROVER`, 403 `SELF_APPROVAL_FORBIDDEN`, 409 `ALREADY_DECIDED`/`ILLEGAL_TRANSITION` |
+| T8 (recall) | `req.user.id == bill.created_by_user_id` AND `bill.status == pending_approval` AND every `BillApproval.status == pending` | 403 `NOT_BILL_CREATOR` or 409 `CANNOT_RECALL_AFTER_DECISION` |
+| T9 (pay) | (`req.user.max_approval_amount_cents >= bill.amount_cents` OR `req.user.role == admin`) AND `req.user.is_active` AND `bill.status == approved` | 403 `INSUFFICIENT_PAY_AUTHORITY` or 409 `ILLEGAL_TRANSITION` |
 | T10 (clone) | User exists and is active AND `source_bill.status == rejected` | 403 `USER_INACTIVE` or 409 `CAN_ONLY_CLONE_REJECTED` |
+
+> All `req.user` references above mean the **acting** identity (the
+> impersonated user when an admin is acting-as, otherwise the real user).
+> When `req.realUser !== req.user` the actor is recorded as `req.user.id` in
+> `BillEvent.actor_user_id` and `req.realUser.id` is captured in
+> `BillEvent.payload.impersonated_by_user_id` (see §6.9 audit-log injection).
 
 ### 6.3.4.1 Admin override
 
@@ -1145,6 +1226,16 @@ Users with `role = admin` hold elevated privileges on a fixed subset of
 transitions. Admin powers do **not** apply universally — they are scoped to
 the situations below. Outside of this scope, admins behave identically to
 regular users.
+
+> **Impersonation interaction (§6.9)**: admin override is evaluated against
+> the **acting** identity (`req.user`), not the real user. While an admin is
+> impersonating a non-admin (e.g., admin Dana acting as submitter Alice),
+> `req.user.role !== 'admin'` and admin override is **not** available — Dana
+> behaves exactly as Alice would. The real-admin identity is preserved in
+> `BillEvent.payload.impersonated_by_user_id` for audit. Admin-only
+> operations defined in §6.9 (user CRUD, starting impersonation) check
+> `req.realUser.role === 'admin'` instead, so an admin impersonating a
+> non-admin still cannot escalate by, say, creating users.
 
 | Transition | Normal authorization | Admin override | Audit implication |
 |---|---|---|---|
@@ -1249,12 +1340,17 @@ specified in §6.5.2. The authoritative code table:
 |---|---|---|
 | 400 | `VALIDATION_ERROR` | Request body / params fail zod validation. `field_issues` populated |
 | 400 | `SUBMISSION_PRECONDITION_FAILED` | T4 precondition 2/3/4/5/6 fails; `field_issues[0].path == "preconditions"` and `.message` identifies the failed precondition |
-| 401 | `UNAUTHORIZED` | `X-User-Id` header missing or user not found |
-| 403 | `USER_INACTIVE` | Current user has `is_active = false` |
-| 403 | `NOT_BILL_CREATOR` | Transition requires creator; current user is not the creator |
-| 403 | `NOT_ELIGIBLE_APPROVER` | Current user not in `eligible_approver_user_ids` for the approval being decided |
-| 403 | `SELF_APPROVAL_FORBIDDEN` | Current user == bill creator on approve/reject AND current user is not admin |
-| 403 | `INSUFFICIENT_PAY_AUTHORITY` | T9: current user's `max_approval_amount_cents` < `bill.amount_cents` AND current user is not admin |
+| 401 | `UNAUTHORIZED` | `Authorization: Bearer <token>` is missing, malformed, refers to no `Session` row, or the session's `expires_at <= now()` (§6.9). Returned uniformly — never reveals which case applied |
+| 401 | `INVALID_CREDENTIALS` | `POST /auth/login`: email not found, password verification failed, or user inactive. Returned uniformly to avoid email-existence info leak (§6.9) |
+| 403 | `USER_INACTIVE` | Acting (`req.user`) or real (`req.realUser`) user has `is_active = false` (§6.9) |
+| 403 | `FORBIDDEN` | Generic authorization failure not covered by a more specific code (e.g., non-admin attempts admin-only user-CRUD operation; non-admin self-edit attempts to change `role` / `max_approval_amount_cents` / `is_active`). See §6.9 |
+| 403 | `CANNOT_IMPERSONATE_SELF` | `POST /auth/impersonate/:userId`: target == `req.realUser.id` (§6.9) |
+| 403 | `CANNOT_IMPERSONATE_ADMIN` | `POST /auth/impersonate/:userId`: target's `role == admin` (§6.9) |
+| 403 | `CANNOT_IMPERSONATE_INACTIVE` | `POST /auth/impersonate/:userId`: target's `is_active == false` (§6.9) |
+| 403 | `NOT_BILL_CREATOR` | Transition requires creator; acting user is not the creator |
+| 403 | `NOT_ELIGIBLE_APPROVER` | Acting user not in `eligible_approver_user_ids` for the approval being decided |
+| 403 | `SELF_APPROVAL_FORBIDDEN` | Acting user == bill creator on approve/reject AND acting user is not admin |
+| 403 | `INSUFFICIENT_PAY_AUTHORITY` | T9: acting user's `max_approval_amount_cents` < `bill.amount_cents` AND acting user is not admin |
 | 409 | `ILLEGAL_TRANSITION` | `(from, to)` pair not in §6.3.2 table |
 | 409 | `ALREADY_DECIDED` | T5/T7: the specific `BillApproval` is no longer `pending` |
 | 409 | `CANNOT_RECALL_AFTER_DECISION` | T8: at least one `BillApproval` is no longer `pending` |
@@ -1262,6 +1358,8 @@ specified in §6.5.2. The authoritative code table:
 | 409 | `INVALID_PAYMENT_DETAILS` | T9: vendor's `payment_details` fails zod validation at pay time (§6.7.4). `field_issues` populated with offending `payment_details` fields |
 | 409 | `VENDOR_HAS_BILLS` | DELETE `/vendors/:id`: any Bill references this vendor |
 | 409 | `DUPLICATE_INVOICE_NUMBER` | POST `/bills` / PATCH `/bills/:id`: `invoice_number` already used for the same vendor |
+| 409 | `EMAIL_TAKEN` | POST `/users` / PATCH `/users/:id`: another user already owns the requested email (§6.9) |
+| 409 | `CANNOT_DEACTIVATE_SELF` | POST `/users/:id/deactivate`: `:id == req.user.id`. An admin must not lock themselves out (§6.9) |
 | 409 | `DEFAULT_RULE_REQUIRED` | V6: mutation would leave zero active rules with `min_amount_cents = 0` (§6.4.4) |
 | 409 | `RULE_IN_USE` | V7 / DELETE `/approval-rules/:id`: rule is referenced by at least one `BillApproval` row (§6.4.6) |
 | 413 | `FILE_TOO_LARGE` | POST `/uploads`: file exceeds 10 MB |
@@ -1308,6 +1406,16 @@ bill-level transition to `approved`.
 `admin_override: true` in their payload when the actor used admin override
 (see §6.3.4.1 for the precise trigger conditions). The UI should display a
 badge on these events in the bill timeline to make the override visible.
+
+**Impersonation flag**: when the request is being made through an admin "login
+as" impersonation session (`req.realUser.id !== req.user.id`), the audit-log
+helper merges `impersonated_by_user_id: req.realUser.id` into the event
+`payload` IN ADDITION to any event-type-specific fields and the optional
+`admin_override` flag above. The two flags are independent — both can appear
+on the same event, neither suppresses the other. `actor_user_id` continues
+to record the **acting** (impersonated) identity on every event regardless
+of impersonation. See §6.9.4 for the full impersonation contract and the
+worked combinations table.
 
 ### 6.3.8 Interactions with other sections
 
@@ -1677,7 +1785,7 @@ in UTC, and monetary amounts are integer cents.
 | Timestamps | ISO 8601 UTC strings (`"2026-04-17T19:36:00.000Z"`) |
 | Dates (no time) | ISO 8601 date strings (`"2026-04-17"`) — `issue_date`, `due_date` use this |
 | Enum values | lowercase snake_case (`pending_approval`, `ach`) |
-| Authentication | `X-User-Id: <user.id>` header required on every request except `GET /health` (see §6.1.6) |
+| Authentication | `Authorization: Bearer <token>` header required on every request except `GET /health` and `POST /auth/login` (see §6.9). Token is opaque and obtained from `POST /auth/login`. Failures are uniformly 401 `UNAUTHORIZED` |
 | Idempotency | `Idempotency-Key` header accepted on `POST /bills/:id/pay` only (Q60). Other mutating endpoints rely on state-machine guards (409 `ALREADY_DECIDED`, 409 `ILLEGAL_TRANSITION`) for duplicate prevention |
 | Pagination | none (§4.6) |
 | CORS | `*` origin allowed in development — this is a local-only demo (§6.1.8) |
@@ -1738,8 +1846,17 @@ themselves.
 | Method | Path | Purpose | Transition / capability |
 |---|---|---|---|
 | `GET` | `/health` | Liveness probe; no auth required | Operational |
-| `GET` | `/users` | List all users (for user switcher) | C-U1 |
-| `GET` | `/users/me` | Return the user matching `X-User-Id` | C-U3 |
+| `POST` | `/auth/login` | Public; verify email + password, mint a `Session`, return `SessionDTO` | §6.9 |
+| `POST` | `/auth/logout` | Authenticated; delete the current `Session` row | §6.9 |
+| `GET` | `/auth/session` | Authenticated; return the current `SessionDTO` | §6.9 |
+| `POST` | `/auth/impersonate/:userId` | Authenticated, admin-only on `req.realUser`; set the current session's `impersonated_user_id` | §6.9 |
+| `POST` | `/auth/stop-impersonating` | Authenticated; clear the current session's `impersonated_user_id` | §6.9 |
+| `GET` | `/users` | List all users (admin sees full UserDTO incl. `is_active`; non-admin sees the same shape — no secrets are gated, just write surfaces) | C-U1, §6.9 |
+| `GET` | `/users/me` | Return the user matching the current session's acting identity | C-U3 |
+| `POST` | `/users` | Admin-only on acting identity. Create a user with bcrypt-hashed password | §6.9 |
+| `PATCH` | `/users/:id` | Admin-or-self. Self path is restricted to `name` / `email` / `password`; admin path accepts any field | §6.9 |
+| `POST` | `/users/:id/deactivate` | Admin-only. Sets `is_active = false`; deletes target's session rows | §6.9 |
+| `POST` | `/users/:id/activate` | Admin-only. Sets `is_active = true` | §6.9 |
 | `GET` | `/vendors` | List vendors | C-V3 |
 | `POST` | `/vendors` | Create a vendor | C-V1, C-V2 |
 | `GET` | `/vendors/:id` | Get vendor detail + recent bills | C-V4 |
@@ -1773,7 +1890,67 @@ fields are marked with `?`. Every field name reflects exact JSON wire names.
 
 #### GET `/health`
 Request: none.
-Response 200: `{ "status": "ok" }`. No `X-User-Id` required.
+Response 200: `{ "status": "ok" }`. No authentication required (one of two unauthenticated endpoints — the other is `POST /auth/login`; see §6.9).
+
+#### POST `/auth/login`
+Public; no `Authorization` header required.
+
+Request body (`LoginRequest`, validated by `loginRequestSchema` from `packages/shared/src/schemas/auth.ts`):
+
+| Field | Type | Notes |
+|---|---|---|
+| `email` | string | Required, valid email. Matched case-insensitively against `User.email` (§6.9.5) |
+| `password` | string | Required, ≥ 1 char (server has no length policy here — only at user creation) |
+
+Response 200: `SessionDTO`:
+
+| Field | Type | Notes |
+|---|---|---|
+| `token` | string | Opaque bearer; subsequent calls use `Authorization: Bearer <token>` |
+| `expires_at` | datetime | ISO 8601 UTC; 7 days from mint by default (§6.9.5) |
+| `user` | `UserDTO` | The real authenticated user (the password owner) |
+| `impersonated_user` | `UserDTO?` | Always `null` from `POST /auth/login`; non-null only after a subsequent `POST /auth/impersonate/:userId` |
+
+Errors: 400 `VALIDATION_ERROR` on body shape; 401 `INVALID_CREDENTIALS` on any failure path (email not found, password mismatch, user inactive). The 401 is uniform — the response body never distinguishes which case applied.
+
+#### POST `/auth/logout`
+Authenticated. Deletes the `Session` row keyed by the caller's bearer token.
+
+Request body: none.
+Response 204: empty body.
+Errors: 401 `UNAUTHORIZED` on missing/invalid token (handled by middleware before the route).
+
+#### GET `/auth/session`
+Authenticated. Returns the caller's current `SessionDTO`. Used by the web client on hard refresh to rehydrate auth state after the browser reload.
+
+Request body: none.
+Response 200: `SessionDTO` (same shape as `POST /auth/login`). `impersonated_user` is non-null when the session has been impersonated.
+Errors: 401 `UNAUTHORIZED`.
+
+#### POST `/auth/impersonate/:userId`
+Authenticated, admin-only on `req.realUser` (the actual session owner — not on `req.user`, since impersonating admins-on-admins would collapse the audit story regardless).
+
+Path param: `userId` — the impersonation target's ID.
+Request body: none.
+
+Response 200: refreshed `SessionDTO` with `impersonated_user` populated. The same `token` is reused — clients do not need to swap credentials, only re-fetch resources.
+
+Errors:
+- 401 `UNAUTHORIZED` (no session)
+- 403 `FORBIDDEN` (`req.realUser.role !== 'admin'`)
+- 403 `CANNOT_IMPERSONATE_SELF` (`target.id === req.realUser.id`)
+- 403 `CANNOT_IMPERSONATE_ADMIN` (`target.role === 'admin'`)
+- 403 `CANNOT_IMPERSONATE_INACTIVE` (`target.is_active === false`)
+- 404 `USER_NOT_FOUND` (no user with that id)
+
+Idempotent across targets: calling again with a different `userId` while already impersonating swaps the target on the same session row.
+
+#### POST `/auth/stop-impersonating`
+Authenticated. Clears `impersonated_user_id` on the caller's session row.
+
+Request body: none.
+Response 200: refreshed `SessionDTO` with `impersonated_user: null`.
+Errors: 401 `UNAUTHORIZED`; 409 `NOT_IMPERSONATING` when the session isn't currently impersonating anyone (chosen over an idempotent 200 so a stale browser-tab "stop" click after another tab already stopped surfaces visibly).
 
 #### GET `/users`
 Request: none (headers only).
@@ -1783,13 +1960,19 @@ Response 200: array of `UserDTO`:
 |---|---|---|
 | `id` | string (CUID) | |
 | `name` | string | |
+| `email` | string | NOT NULL (§6.2.3); login identifier |
 | `role` | `UserRole` | |
 | `max_approval_amount_cents` | integer | |
 | `is_active` | boolean | |
 
+`password_hash` is intentionally never serialised in any DTO. Admin-only
+write surfaces (`POST /users`, `PATCH /users/:id`) accept a plaintext
+`password` field and the API hashes it with bcrypt cost 10 before
+persistence (§6.9).
+
 #### GET `/users/me`
-Response 200: single `UserDTO` matching the `X-User-Id` header.
-Response 401: `UNAUTHORIZED` if header missing or user not found.
+Response 200: single `UserDTO` matching the **acting** identity (`req.user`). When the session is impersonating, this returns the impersonated user — consistent with the rest of the API where authorization runs against `req.user`. Use `GET /auth/session` (§6.9) to see both the real and impersonated users at once.
+Response 401: `UNAUTHORIZED` if `Authorization: Bearer …` is missing/invalid/expired (§6.9).
 
 #### POST `/vendors`
 Request body:
@@ -2015,7 +2198,7 @@ Response 200:
 | `201 Created` | Successful resource creation |
 | `204 No Content` | Successful deletion |
 | `400 Bad Request` | Validation errors; submission preconditions failed |
-| `401 Unauthorized` | `X-User-Id` missing or user not found |
+| `401 Unauthorized` | `Authorization: Bearer …` missing/malformed/expired, or session not found; also `POST /auth/login` failures (uniform `INVALID_CREDENTIALS`) |
 | `403 Forbidden` | Authenticated but not authorized for this action (role/creator/limit checks) |
 | `404 Not Found` | Resource does not exist |
 | `409 Conflict` | State-machine violations; referential integrity violations |
@@ -2039,44 +2222,67 @@ American English. Every screen below is a route in `react-router-dom`.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│  [Sidebar]  │  Page title                  [User switcher ▾]         │
+│ ⚠ You are signed in as Dana Admin · acting as Alice  [ Stop ]       │  ← Impersonation banner (only when impersonating)
+├──────────────────────────────────────────────────────────────────────┤
+│  [Sidebar]  │  Page title    [Login as ▾] [Profile] [Logout]         │
 │             │  ─────────────────────────────────────────────         │
 │  Dashboard  │                                                        │
 │  Bills      │                                                        │
 │  Vendors    │             Page content                               │
 │  Rules      │                                                        │
+│  Users (•)  │  (• admin-only — see Sidebar nav row)                  │
 │             │                                                        │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
+The chrome lives **inside** the auth-guarded `<Layout />` wrapper. The
+`/login` route (§6.6.x — "Login screen") is rendered **outside** this
+wrapper and has none of the elements below.
+
 | Element | Component | Notes |
 |---|---|---|
-| Sidebar | `<aside>` + shadcn `NavigationMenu` links | Icons from `lucide-react`: LayoutDashboard, Receipt, Users, Shield. Active route is visually highlighted. Fixed width (240px on 1280px viewport) |
+| Auth guard | `<RequireSession>` wrapper around `<Layout />` | If no `SessionDTO` is loaded (no token in store, or `GET /auth/session` 401s), `Navigate to /login`. On any 401 from a subsequent API call, the fetch wrapper clears the stored token and triggers the same redirect (§6.9) |
+| Impersonation banner | High-contrast strip at the very top | Visible **only** when `session.impersonated_user !== null`. Copy: "You are signed in as **{realUser.name}** · acting as **{impersonatedUser.name}**". Trailing `Stop` button calls `POST /auth/stop-impersonating` then refetches `GET /auth/session` and invalidates all React Query caches |
+| Sidebar | `<aside>` + shadcn `NavigationMenu` links | Existing four items: Dashboard, Bills, Vendors, Rules. **New fifth item "Users"** rendered iff `session.user.role === 'admin'` (i.e., the **acting** identity is admin). While impersonating a non-admin, the Users item disappears — consistent with the rest of the app authorising on `req.user`. Icons: LayoutDashboard, Receipt, Users, Shield, UserCog. Active route highlighted. Fixed width (240px on 1280px viewport) |
 | Page title | `<h1>` | Left-aligned; reflects current route (e.g., "Bills", "Vendor: Acme Corp") |
-| User switcher | shadcn `DropdownMenu` | Top-right. Trigger label: `<CurrentUser.name> · Limit <$amount or "$0">  ▾`. Menu items: all users from `GET /users`. Clicking a user updates the `X-User-Id` value in the in-memory store AND invalidates all React Query caches so views reflect the new perspective |
+| Impersonation switcher | shadcn `DropdownMenu` | Top-right. Visible **only** when `realUser.role === 'admin'` AND `impersonated_user === null`. Trigger label: `Login as ▾`. Menu lists all non-admin, active users from `GET /users` (admins and inactive users are filtered out client-side; the API enforces the same constraint with `CANNOT_IMPERSONATE_ADMIN` / `CANNOT_IMPERSONATE_INACTIVE`). Clicking calls `POST /auth/impersonate/:userId`, refetches `GET /auth/session`, and invalidates all React Query caches |
+| Profile affordance | Link / icon button | Always visible. Trigger label: current acting user's name + role (e.g., `Alice Submitter · submitter`). Clicking navigates to `/users/:id/edit` for the **acting** user. (Exact placement — separate icon button vs. nested in a user-menu dropdown — is left to packages C/D; see their reports.) |
+| Logout button | shadcn `Button` (ghost variant) | Always visible. Calls `POST /auth/logout`, clears the local session token, navigates to `/login` |
 | Page content area | `<main>` | Scrollable; chrome does not scroll. Max-width 1200px centered (gives breathing room on 1920px displays) |
 
-The current user's ID is stored in `localStorage` under `bill-pay.current-user-id`
-so the selection persists across page reloads. On app load, if the stored ID
-does not match a user in `GET /users`, default to the first user returned.
+The session token is stored in `localStorage` under `bill-pay.session-token`
+so re-loads survive without re-login. On app load, the auth bootstrap calls
+`GET /auth/session` with the stored token; on 401 it clears the storage and
+redirects to `/login`. (The pre-§6.9 `bill-pay.current-user-id` key is
+gone — the user identity is now derived from the server-side session.)
 
 ### 6.6.2 Routes & screen inventory
 
-| Route | Screen | Section |
-|---|---|---|
-| `/` | Dashboard | §6.6.3 |
-| `/bills` | Bills list | §6.6.4 |
-| `/bills/new` | Bill create form | §6.6.5 |
-| `/bills/:id` | Bill detail | §6.6.6 |
-| `/bills/:id/edit` | Bill edit form (same component as create, different mode) | §6.6.5 |
-| `/vendors` | Vendors list | §6.6.7 |
-| `/vendors/new` | Vendor create form | §6.6.8 |
-| `/vendors/:id` | Vendor detail (incl. bill history) | §6.6.7 |
-| `/vendors/:id/edit` | Vendor edit form | §6.6.8 |
-| `/approval-rules` | Rules list (with in-place modal create/edit) | §6.6.9 |
+| Route | Screen | Section | Auth guard |
+|---|---|---|---|
+| `/login` | Login screen | §6.6.14 | **Outside** `<Layout />` — public. Authenticated visitors are bounced to `/`. |
+| `/` | Dashboard | §6.6.3 | Inside guarded layout |
+| `/bills` | Bills list | §6.6.4 | Inside guarded layout |
+| `/bills/new` | Bill create form | §6.6.5 | Inside guarded layout |
+| `/bills/:id` | Bill detail | §6.6.6 | Inside guarded layout |
+| `/bills/:id/edit` | Bill edit form (same component as create, different mode) | §6.6.5 | Inside guarded layout |
+| `/vendors` | Vendors list | §6.6.7 | Inside guarded layout |
+| `/vendors/new` | Vendor create form | §6.6.8 | Inside guarded layout |
+| `/vendors/:id` | Vendor detail (incl. bill history) | §6.6.7 | Inside guarded layout |
+| `/vendors/:id/edit` | Vendor edit form | §6.6.8 | Inside guarded layout |
+| `/approval-rules` | Rules list (with in-place modal create/edit) | §6.6.9 | Inside guarded layout |
+| `/users` | Admin users list | §6.6.15 | Admin-only on **acting** identity |
+| `/users/new` | Admin: create user form | §6.6.15 | Admin-only on **acting** identity |
+| `/users/:id/edit` | User edit form (admin: full; non-admin self: name/email/password only) | §6.6.15 | Acting user is admin OR `:id == req.user.id` |
 
 Rule create/edit has no dedicated route — managed via modal on `/approval-rules`
 (Q63). A deep link like `/approval-rules/new` is not supported.
+
+User CRUD has dedicated routes (rather than a modal) because the form is
+bigger than the rule editor (six fields plus a sub-mode for self-edit) and
+the admin user-management flow is rare enough that direct linkability is
+useful. `/users/new` is admin-only; non-admins navigating there see a 403
+toast and are redirected back to the previous route.
 
 ### 6.6.3 Dashboard screen (`/`)
 
@@ -2442,6 +2648,8 @@ combo.
 | Vendor detail > bills | Vendor has no bills | "No bills for this vendor yet." | "+ New bill with this vendor" |
 | Rules list | No rules | (unreachable — default rule is seeded and cannot be deleted per §6.4.4) | (n/a) |
 | Bill timeline | Empty events array | (unreachable — `created` event is always emitted) | (n/a) |
+| Users list (admin) | No users | (unreachable — seed always has 4 users; no hard-delete per §6.2.7) | (n/a) |
+| Login page | No state — form-only | (n/a) | "Sign in" |
 
 ### 6.6.11 Loading, error, toast patterns
 
@@ -2452,7 +2660,7 @@ combo.
 | Form submit | Entire form disabled; primary button shows inline spinner + "Saving…" text |
 | Action buttons (Approve/Reject/Pay/Recall/Clone) | Button disabled + inline spinner during request |
 | Success | shadcn `Toast` (sonner) top-right, autoclose 4s. Copy: "{Action} successful." |
-| Error (4xx) | shadcn `Toast` top-right, **manual dismiss**. Copy: the `detail` from RFC 7807 response (§6.5.2) |
+| Error (4xx) | shadcn `Toast` top-right, **manual dismiss**. Copy: the `detail` from RFC 7807 response (§6.5.2). **Special case**: 401 `UNAUTHORIZED` from any authenticated endpoint clears the local session token and redirects to `/login` (no toast — the redirect itself is the affordance). 401 `INVALID_CREDENTIALS` from `POST /auth/login` is rendered as a uniform inline error on the login form, not a toast |
 | Error (5xx) | `Toast`: "Something went wrong. Please try again." — no stack leak |
 | Optimistic updates | **Not used** — every action waits for server confirmation (§3.3 "No magic"; simpler reasoning for the agent) |
 
@@ -2497,11 +2705,25 @@ flowchart LR
     RulesList -- "+ New rule / row click" --> RuleModal
     RuleModal -- "save / cancel" --> RulesList
 
-    subgraph sidebar["Sidebar (always visible)"]
+    Login["Login (/login)"]
+    UsersList["Users list (/users) — admin"]
+    UserNew["User new (/users/new) — admin"]
+    UserEdit["User edit (/users/:id/edit)"]
+
+    Login -- "successful login" --> Dashboard
+    Dashboard -- "401 from any API call" --> Login
+    UsersList -- "+ New user (admin)" --> UserNew
+    UsersList -- "row click" --> UserEdit
+    UserNew -- "save" --> UsersList
+    UserEdit -- "save" --> UsersList
+    Dashboard -- "Profile (header)" --> UserEdit
+
+    subgraph sidebar["Sidebar (always visible when authenticated)"]
         Dashboard
         BillsList
         VendorsList
         RulesList
+        UsersList
     end
 ```
 
@@ -2513,9 +2735,119 @@ flowchart LR
 - No drag-and-drop bill reordering.
 - No animations beyond shadcn defaults (section transitions, modal fade).
 - No dark mode toggle (§2.1 OQ-5 — light mode only).
-- No user preferences persistence beyond the current-user ID (§6.6.1).
+- No user preferences persistence beyond the session token (§6.6.1, §6.9).
 - No in-app notifications / toast feed / bell icon.
 - No tour / onboarding flow.
+- No self-signup, no password-reset, no "forgot password", no email verification, no MFA UI (§6.9).
+- No cross-device session list / "log out of all devices" UI (§6.9 cuts).
+
+### 6.6.14 Login screen (`/login`)
+
+**Purpose**: gate the rest of the app behind a real authentication surface
+(§6.9). This is the only route rendered **outside** the auth-guarded
+`<Layout />` wrapper (§6.6.1).
+
+**Layout**:
+
+```
+┌────────────────────────────────────────────────────────┐
+│                    Bill Pay                            │
+│                                                        │
+│    Email     [ alice@acmewidgets.demo            ]     │
+│    Password  [ •••••••••                         ]     │
+│                                                        │
+│              [ Sign in ]                               │
+│                                                        │
+│   ─── Demo credentials ────────────────────────        │
+│   Alice Submitter   alice@acmewidgets.demo / demo1234  │
+│   Bob Approver-L1   bob@acmewidgets.demo   / demo1234  │
+│   Carol Approver-L2 carol@acmewidgets.demo / demo1234  │
+│   Dana Admin        dana@acmewidgets.demo  / demo1234  │
+└────────────────────────────────────────────────────────┘
+```
+
+**Form**: react-hook-form + zod (`loginRequestSchema` from
+`packages/shared/src/schemas/auth.ts`):
+
+| Field | Type | Notes |
+|---|---|---|
+| `email` | `Input` (type=email) | Required; valid email |
+| `password` | `Input` (type=password) | Required; min 1 char (the API enforces real length on user creation, not on login) |
+
+**Submit**: `POST /auth/login`. On 200, store `token` in `localStorage`
+under `bill-pay.session-token`, populate the React Query cache with the
+returned `SessionDTO`, navigate to the previous protected route or `/`. On
+401, surface a single uniform error: "Invalid email or password." (Never
+distinguish "email not found" from "wrong password" — `INVALID_CREDENTIALS`
+is uniform per §6.9.)
+
+**Demo credentials hint**: a small panel below the form lists the four
+seeded users with `demo1234` as the password, so a reviewer can log in in
+≤5 seconds without consulting the README. Visible only when
+`import.meta.env.MODE !== 'production'` — the panel is a deliberate
+demo-mode affordance and would be removed in any real deployment.
+
+**Authenticated visitors**: an already-authenticated session that lands on
+`/login` is redirected to `/` immediately. The route is otherwise public.
+
+**Empty / loading state**: the form is the entire page; no skeleton needed.
+Submit button shows a spinner while the request is in flight; both inputs
+are disabled.
+
+### 6.6.15 Users admin pages (`/users`, `/users/new`, `/users/:id/edit`)
+
+**Purpose**: the §6.9 user-CRUD surface. Three routes share one form
+component (similar to §6.6.5 / §6.6.8).
+
+**`/users` — list**:
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│ Users                                              [ + New user ]    │
+│                                                                      │
+│ ┌──────────────────────────────────────────────────────────────────┐ │
+│ │ Name              │ Email                  │ Role     │ Limit   │ │
+│ │ Alice Submitter   │ alice@acmewidgets.demo │ submitter│  $0     │ │
+│ │ Bob Approver-L1   │ bob@…                  │ approver │ $10,000 │ │
+│ │ Dana Admin        │ dana@…                 │ admin    │  $0     │ │
+│ │ ...                                                              │ │
+│ └──────────────────────────────────────────────────────────────────┘ │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+- Admin-only (acting identity). Non-admin direct navigation: 403 toast + redirect.
+- Columns: Name, Email, Role, Limit, Active toggle, row-action menu.
+- Active column is an inline `Switch`; toggling calls `POST /users/:id/deactivate` or `/activate`. Disabled with tooltip when `:id == req.user.id` (cannot deactivate self → would be `CANNOT_DEACTIVATE_SELF` server-side; UI prevents the click).
+- Row-action menu: Edit, Login as (admin-only; only for non-admin, active rows — calls `POST /auth/impersonate/:userId` then redirects to `/`).
+- Row click → `/users/:id/edit`.
+- Empty state: unreachable in MVP — the seed always has 4 users and there is no hard-delete.
+
+**`/users/new` — admin create form**:
+
+| Field | Component | Notes |
+|---|---|---|
+| Name | `Input` | 1–100 chars |
+| Email | `Input` (type=email) | Required, valid email, unique server-side (409 `EMAIL_TAKEN` mapped to inline error) |
+| Role | shadcn `Select` | `submitter` / `approver` / `admin` |
+| Approval limit (cents) | `Input` with `$` prefix | Integer dollars; required, `>= 0` |
+| Password | `Input` (type=password) | Min 8 chars (per `passwordSchema`); shown with a visibility toggle |
+| Is active | `Switch` | Defaults to on |
+
+Submit calls `POST /users`. On 201 navigate back to `/users`. On 409
+`EMAIL_TAKEN` map the error to the email field's inline message.
+
+**`/users/:id/edit` — admin OR self**:
+
+- Mode is determined by `req.user.role === 'admin'` and `:id === req.user.id`.
+- **Admin mode** (admin editing anyone, including themselves): full form per `/users/new`. Password is optional in edit (blank = no change). All fields editable.
+- **Self mode** (non-admin editing their own row, OR `:id === req.user.id` and acting role is not admin): only Name / Email / Password are visible. Role / Limit / Is active are **hidden** (not just disabled — these fields are absent from the rendered form so the schema served to the user matches `selfUpdateRequestSchema`).
+- Direct navigation by a non-admin to a `:id` that isn't their own: 403 toast + redirect.
+- Submit calls `PATCH /users/:id` with the appropriate body shape (`UpdateUserRequest` for admin, `SelfUpdateRequest` for self). The server enforces the same constraint independently — the UI's hide-don't-disable choice is defence in depth.
+
+**Loading / errors**: skeleton on initial fetch (admin mode) or on `GET
+/users/:id` (admin viewing arbitrary user). Inline form errors map to
+`field_issues`. 409 `EMAIL_TAKEN` lands on the email field. 401 from any
+write triggers the global redirect-to-login flow (§6.6.1).
 
 ## 6.7 Mock payment execution model
 
@@ -2717,14 +3049,18 @@ required before the demo can start.
 Deterministic IDs so the §4.3 walkthrough and §6.4.8 worked examples are
 reproducible.
 
-| `id` | `name` | `role` | `max_approval_amount_cents` | `email` |
-|---|---|---|---|---|
-| `user_alice` | Alice Submitter | `submitter` | `0` | `alice@acmewidgets.demo` |
-| `user_bob` | Bob Approver-L1 | `approver` | `1_000_000` ($10,000) | `bob@acmewidgets.demo` |
-| `user_carol` | Carol Approver-L2 | `approver` | `10_000_000` ($100,000) | `carol@acmewidgets.demo` |
-| `user_dana` | Dana Admin | `admin` | `0` (override applies) | `dana@acmewidgets.demo` |
+| `id` | `name` | `role` | `max_approval_amount_cents` | `email` | Password |
+|---|---|---|---|---|---|
+| `user_alice` | Alice Submitter | `submitter` | `0` | `alice@acmewidgets.demo` | `demo1234` |
+| `user_bob` | Bob Approver-L1 | `approver` | `1_000_000` ($10,000) | `bob@acmewidgets.demo` | `demo1234` |
+| `user_carol` | Carol Approver-L2 | `approver` | `10_000_000` ($100,000) | `carol@acmewidgets.demo` | `demo1234` |
+| `user_dana` | Dana Admin | `admin` | `0` (override applies) | `dana@acmewidgets.demo` | `demo1234` |
 
-All `is_active = true`.
+All `is_active = true`. All four share the demo plaintext password
+`demo1234` — bcrypt-hashed at cost 10 once at seed time and reused across
+the four `password_hash` columns. The shared password is a deliberate demo
+affordance (lets the reviewer log in as any seeded user without consulting
+multiple secrets); it is **not** a recommendation for production seeding.
 
 ### 6.8.3 Approval rules (2)
 
@@ -2856,8 +3192,9 @@ container on startup when `SEED_ON_EMPTY=true` AND the DB has zero users.
 **Top-level flow**:
 
 1. **Empty-check**: count users. If > 0, exit 0 silently. Otherwise proceed.
-2. **Users**: insert the 4 `user_*` rows.
-3. **Approval rules**: insert the 2 `rule_*` rows.
+2. **Hash demo password once**: `const demoHash = await bcrypt.hash("demo1234", 10)`. Reused across all four user rows so the seed pays the bcrypt cost (~70ms) only once.
+3. **Users**: insert the 4 `user_*` rows with `password_hash = demoHash` (§6.2.3, §6.8.2).
+4. **Approval rules**: insert the 2 `rule_*` rows.
 4. **Vendors**: insert the 9 vendor rows (random CUIDs).
 5. **Attachments prep**: copy the sample PDF to `${UPLOAD_DIR}` 3 times with new `stored_filename`s.
 6. **Bills**: iterate through all 20 bills.
@@ -2918,6 +3255,191 @@ by name. Other entities use CUIDs so seed and runtime are indistinguishable.
 - **No `cancelled` `BillApproval` rows are seeded** (because rejections cascade other approvals to `cancelled`; for seeded rejections `INV-R-001` is a single-rule rejection with no other rows to cancel, and `INV-R-002` produces one cancelled row from the default rule). The demo naturally exhibits `cancelled` when the reviewer rejects `INV-P-002` or `INV-P-004` during the walkthrough.
 - **No `recalled` events are seeded**. The reviewer can exercise T8 recall on any draft→submitted bill they create.
 - **The sample PDF is not a real invoice from a real vendor**. It's a template — avoid suggesting otherwise in the README or demo prose.
+
+## 6.9 Authentication, sessions, and user management
+
+> **Status**: in scope for the MVP. Reverses the §4.6 "no login / no session
+> / no runtime user creation" cuts and the §6.1.6 `X-User-Id` header. The
+> remaining cuts (multi-tenancy, MFA, password reset, etc.) are listed in
+> §6.9.6.
+
+This section is the authoritative model for authentication and user
+management. It supersedes the original §6.1.6 (`X-User-Id` header), the
+§6.2.3 User entity's "no runtime creation" note, and §4.6's "no login /
+session" bullet. New error codes introduced here are merged into the
+canonical table in §6.3.6; new endpoints are inventoried in §6.5.3 and
+detailed in §6.5.4.
+
+### 6.9.1 Authentication model
+
+- **Login identifier**: `User.email` — NOT NULL, `@unique` (§6.2.3).
+- **Credential**: `User.password_hash` — bcrypt with cost 10. The plaintext password is verified server-side with `bcrypt.compare`; it is never stored, logged, or echoed in any DTO. The column is nullable on the schema (so non-password identities can exist defensively), but the seed populates it for all four demo users and `POST /users` requires a password.
+- **Token transport**: opaque session token sent as `Authorization: Bearer <token>`. Tokens are 32 random bytes hex-encoded (64 hex chars), generated by `crypto.randomBytes` server-side at login.
+- **Session storage**: server-side row in the `Session` entity (§6.2.3). The token IS the row's primary key; lookup is exact-match on every authenticated request.
+- **Session TTL**: 7 days from mint (`expires_at = now() + 7 days`). No sliding window — each `POST /auth/login` mints a fresh session row with a fresh expiry.
+- **Token revocation**:
+  - `POST /auth/logout` — deletes the session row keyed by the caller's bearer token.
+  - `POST /users/:id/deactivate` — deletes every session whose `user_id` or `impersonated_user_id` is the deactivated user (forced logout). The `is_active` flip happens after the session sweep so the auth middleware never sees a half-applied state.
+  - `PATCH /users/:id` flipping `is_active` from true → false has the same side effect.
+  - `PATCH /users/:id` demoting a user away from `admin` deletes that user's currently-impersonating sessions only (plain non-impersonating sessions are left intact and inherit the new role on the next request).
+  - Expiry past `expires_at` — the middleware deletes the row best-effort and returns 401.
+- **Demo password**: all four seeded users (§6.8.2) share the plaintext password `demo1234`, hashed once at seed time and reused across the four `password_hash` columns. This is a deliberate demo affordance (the reviewer can sign in as any seeded user without consulting multiple secrets) — not a recommendation for production seeding.
+
+### 6.9.2 Authorization middleware
+
+The `current-user` middleware (`packages/api/src/middleware/current-user.ts`)
+runs on every authenticated request and resolves three properties:
+
+| Property | Source | Used by |
+|---|---|---|
+| `req.session` | session row by token | `POST /auth/logout` (delete by token), `POST /auth/impersonate/:userId` (mutate `impersonated_user_id` in place) |
+| `req.realUser` | `session.user` | admin gates for impersonation start (`POST /auth/impersonate/:userId`) and audit-log payload injection (§6.9.4) |
+| `req.user` (acting identity) | `session.impersonated_user ?? session.user` | every other authorization check — bills, approvals, vendors, rules, payments, dashboard, user CRUD admin gates (§6.3.4 / §6.4 / §6.6) |
+
+Resolution table:
+
+| Condition | Response |
+|---|---|
+| `Authorization` header missing or not `Bearer <token>` | 401 `UNAUTHORIZED` |
+| Token does not match a row in `sessions` | 401 `UNAUTHORIZED` |
+| `session.expires_at <= now()` | 401 `UNAUTHORIZED` (the expired row is deleted best-effort) |
+| `realUser.is_active === false` OR `actingUser.is_active === false` | 403 `USER_INACTIVE` |
+| Otherwise | populate `req.session`, `req.realUser`, `req.user`; call `next()` |
+
+The 401 cases are uniform — the response body never distinguishes "no
+header" from "token unknown" from "token expired" so a caller cannot probe
+for valid tokens. (`POST /auth/login` failures use a distinct uniform code,
+`INVALID_CREDENTIALS`, for the same reason — see §6.9.3.)
+
+`/health` and `POST /auth/login` are mounted **before** this middleware in
+`packages/api/src/index.ts` and are exempt. Every other route requires a
+valid bearer token.
+
+**Acting-identity invariant**: every existing route's authorization
+continues to operate on `req.user`. This is the design choice that makes
+impersonation behave correctly without per-route plumbing — when admin Dana
+impersonates submitter Alice, every subsequent bill / vendor / rule API
+call evaluates as if Alice were calling, including admin-override checks
+(§6.3.4.1) which now return false. See §6.9.4 for the full impersonation
+contract.
+
+### 6.9.3 Endpoints
+
+Detailed request/response shapes are in §6.5.4. Authorization summary:
+
+| Endpoint | Authorization rule |
+|---|---|
+| `POST /auth/login` | Public. No session required. Returns 401 `INVALID_CREDENTIALS` uniformly on any failure (no email-existence leak). |
+| `POST /auth/logout` | Authenticated. Deletes the caller's own session row. 204. |
+| `GET /auth/session` | Authenticated. Returns the caller's `SessionDTO` (real user + impersonated user, if any). |
+| `POST /auth/impersonate/:userId` | Authenticated AND `req.realUser.role === 'admin'`. Forbidden when target is self / admin / inactive (§6.9.4). |
+| `POST /auth/stop-impersonating` | Authenticated. 409 `NOT_IMPERSONATING` when the session isn't currently impersonating anyone. |
+| `GET /users` | Authenticated. Read-only for any role; the same `UserDTO` shape regardless of caller (no secret fields are gated — only write surfaces are). |
+| `GET /users/me` | Authenticated. Returns the **acting** identity's `UserDTO`. |
+| `POST /users` | `req.user.role === 'admin'`. Acting-identity check — admins impersonating non-admins lose this. 409 `EMAIL_TAKEN` on collision. |
+| `PATCH /users/:id` | Admin-or-self: `req.user.role === 'admin'` (admin path, full schema) OR `req.user.id === :id` (self path, name / email / password only). Anything else → 403 `FORBIDDEN`. |
+| `POST /users/:id/deactivate` | `req.user.role === 'admin'` AND `:id !== req.user.id`. 409 `CANNOT_DEACTIVATE_SELF` on self target. Side effect: revoke all of the target's sessions (forced logout). |
+| `POST /users/:id/activate` | `req.user.role === 'admin'`. Idempotent against an already-active target (no error). |
+
+> **Why admin gates check `req.user.role` (acting), not `req.realUser.role`**:
+> the whole point of impersonation is to preview the world as the target
+> sees it. An admin acting as a submitter intentionally loses admin powers
+> — they see exactly what the submitter would. Auth-only operations
+> (`POST /auth/impersonate/:userId`, `POST /auth/stop-impersonating`) are
+> the exceptions: they gate on `req.realUser.role` so an admin impersonating
+> a non-admin can still stop impersonating, and so a non-admin who somehow
+> reached an `/auth/impersonate/...` endpoint cannot start a new
+> impersonation.
+
+### 6.9.4 Impersonation
+
+**Mechanism**: `POST /auth/impersonate/:userId` updates
+`impersonated_user_id` on the caller's existing `Session` row. The same
+bearer token continues to work; the client doesn't re-fetch credentials.
+`POST /auth/stop-impersonating` clears that field back to `null` on the
+same row. Clients invalidate React Query caches around both transitions
+so cached bill / vendor data reflects the new acting identity.
+
+**Forbidden cases** (each its own descriptive code so the UI can branch):
+
+| Code | HTTP | Trigger |
+|---|---|---|
+| `FORBIDDEN` | 403 | `req.realUser.role !== 'admin'` |
+| `CANNOT_IMPERSONATE_SELF` | 403 | `target.id === req.realUser.id` |
+| `CANNOT_IMPERSONATE_ADMIN` | 403 | `target.role === 'admin'` (admin-on-admin impersonation collapses the audit story) |
+| `CANNOT_IMPERSONATE_INACTIVE` | 403 | `target.is_active === false` |
+| `USER_NOT_FOUND` | 404 | no user with that id |
+
+`POST /auth/impersonate/:userId` is idempotent across targets — calling it
+again with a different `userId` while already impersonating just swaps the
+target on the same session row.
+
+**Behavior while impersonating**:
+
+- Every existing authorization rule (§6.3.4 / §6.4 / §6.6) reads `req.user`, which now resolves to the impersonated user. Admin override (§6.3.4.1) is therefore unavailable while impersonating a non-admin (e.g., admin Dana acting as Alice cannot self-approve a bill or pay above her acting limit).
+- Bills created during impersonation have `Bill.created_by_user_id = req.user.id` (the impersonated user). The real admin appears nowhere on the `Bill` row — only in the event payload (below).
+- Approvals decided during impersonation set `BillApproval.decided_by_user_id = req.user.id`. Likewise for `Payment.initiated_by_user_id` and `Attachment.uploaded_by_user_id`.
+- The 401 / 403 surfaces are unchanged — there is no special "you are impersonating, did you mean…" prompt; if the action would not work for the impersonated user it does not work here either.
+
+**Audit-log payload injection**: when `BillEvent` rows are emitted, the
+audit-log helper (`packages/api/src/services/audit-log.ts`) checks
+whether `req.realUser.id !== req.user.id`. If true (impersonation active),
+it merges `impersonated_by_user_id: req.realUser.id` into the event's
+`payload` IN ADDITION to the existing event-type-specific payload fields
+(§6.2.3 BillEvent payload table) and the optional `admin_override: true`
+flag (§6.3.7). The `actor_user_id` column continues to hold the **acting**
+(impersonated) identity. The two flags are orthogonal:
+
+| Real user | Acting user | `actor_user_id` | `payload.admin_override` | `payload.impersonated_by_user_id` |
+|---|---|---|---|---|
+| Bob (approver) | Bob | Bob | (omitted; Bob is in the rule pool) | (omitted) |
+| Dana (admin) | Dana | Dana | `true` (when override fires) | (omitted) |
+| Dana (admin) | Alice (submitter) | Alice | (omitted; Alice is not admin) | Dana's id |
+| Dana (admin) | Bob (approver) | Bob | (omitted in normal flow) | Dana's id |
+
+**Forced-stop path**: if the impersonation target is deactivated mid-session
+(via `POST /users/:id/deactivate` or `PATCH /users/:id` flipping
+`is_active` to false), the deactivation handler deletes every session
+that names the target either as `user_id` or `impersonated_user_id`. The
+admin's next request returns 401, the web client clears the local token
+and redirects to `/login`, and the admin re-authenticates from scratch.
+There is no graceful "impersonation interrupted" UI — the redirect itself
+is the affordance.
+
+### 6.9.5 Implementation notes
+
+| Concern | Choice | File |
+|---|---|---|
+| Session token entropy | 32 random bytes, hex-encoded (64 chars). `crypto.randomBytes` (CSPRNG). | `packages/api/src/lib/auth.ts` |
+| Session TTL | 7 days from mint, fixed (no sliding window). | `packages/api/src/lib/auth.ts` (`SESSION_TTL_MS`) |
+| Password hashing | bcrypt, cost 10. | `packages/api/src/lib/auth.ts` (`BCRYPT_COST`) |
+| Login email match | Case-insensitive (Prisma `mode: "insensitive"`) so the demo's lowercased seed emails work regardless of input case. | `packages/api/src/routes/auth.ts` |
+| Session-row creation | `prisma.session.create` inside `POST /auth/login` after password verification. | `packages/api/src/routes/auth.ts` |
+| Web token storage | `localStorage` under key `bill-pay.session-token`. Loaded on app boot via `GET /auth/session` to rehydrate; cleared on 401 from any authenticated endpoint, or on `POST /auth/logout`. | `packages/web/src/lib/auth-store.ts` |
+| Web 401 handler | Fetch wrapper inspects every response; on 401 from an authenticated endpoint, clears the local token and `Navigate`s to `/login`. 401 from `POST /auth/login` itself is rendered inline on the form (uniform "Invalid email or password.") — never as a redirect. | `packages/web/src/lib/api.ts` |
+| Demo-credentials hint | Rendered on `/login` only when `import.meta.env.MODE !== 'production'`. | `packages/web/src/pages/login.tsx` |
+
+**Migration**:
+`packages/api/prisma/migrations/20260428231943_add_auth_sessions/migration.sql`.
+Adds the `password_hash` column to `users`, makes `users.email` NOT NULL,
+creates the `sessions` table with the two FKs (both `ON DELETE RESTRICT`)
+and the `sessions_user_id_idx` secondary index. Run via `prisma migrate
+dev` locally or `prisma migrate deploy` in the api container's startup
+script (§6.1.5). Existing demo databases must `make reset` (§6.1.4) to
+pick up the schema change, since the new NOT NULL on `email` would fail
+on rows that didn't previously carry one.
+
+### 6.9.6 Out of scope (still cut)
+
+- **Self-signup** — admin invitation only. The `/users/new` form is admin-gated; there is no public registration route.
+- **Forgot-password / password-reset** — no email infra (§4.6); admins rotate a user's password via `PATCH /users/:id`.
+- **Email verification** — emails are stored as-typed and treated as the identifier. No verification round-trip.
+- **Multi-factor authentication** — single-factor only. Not in §6.1.1's tech stack.
+- **Hard user delete** — the FK Restrict relations from `bills`, `bill_approvals`, `payments`, `bill_events`, `attachments`, and `sessions` make it impractical (§6.2.7). Deactivate (`is_active = false`) instead — `POST /users/:id/deactivate` does this and revokes all of the target's sessions.
+- **JWT** — opaque server-side tokens only. No JWT library, no JWS / JWE, no public-key signing.
+- **Cookie sessions / CSRF infrastructure** — `Authorization: Bearer …` only; no `Set-Cookie`, no CSRF tokens.
+- **Cross-device session list / "log out everywhere" UI** — sessions are revoked indirectly via `POST /users/:id/deactivate` or by the user logging out of each device individually.
+- **Multi-tenancy** — single-tenant; every authenticated user sees every row in the org, subject only to the per-row authorization rules already specified in §6.3.4 / §6.4 / §6.6.
 
 ---
 
@@ -3613,7 +4135,7 @@ Scenario: Inactive user is rejected at authorization
 ### X-AC-6 — Full demo walkthrough completes (§4.3)
 
 The 14-step walkthrough in §4.3, executed against a freshly reset instance,
-must complete end-to-end without errors, consolation of seed data, or manual
+must complete end-to-end without errors, consultation of seed data, or manual
 DB manipulation. This is the single highest-leverage integration criterion.
 
 ---
@@ -4114,7 +4636,7 @@ checklist**, and references.
 
 **Done when**:
 - `make reset` wipes volumes and reseeds; dashboard immediately shows overdue + upcoming + paid-last-30-days all non-empty — §7 D-AC-1 / §9.2 B-R4 detection
-- Every list view has the specified empty-state copy when emptied — §4.4 Q-6
+- Every list view has the specified empty-state copy when empty — §4.4 Q-6
 - README is >500 words and has all 5 required sections — §4.5 O-4
 - `git status` shows no committed secrets, node_modules, or build artifacts — §4.5 O-7
 

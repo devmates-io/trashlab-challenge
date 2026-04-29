@@ -1,12 +1,24 @@
 # Bill Pay MVP
 
-A small-business Accounts Payable (AP) tool: manage vendors, capture bills,
-route them through a configurable approval rules engine, and settle payments
-through mocked ACH / check / wire / card rails. The authoritative
-specification lives at [`docs/specs/bill-pay-mvp.md`](./docs/specs/bill-pay-mvp.md) —
-this README summarizes the product, explains the scope boundary, and points at
-the commands a reviewer needs; the spec is the source of truth for anything
-that feels ambiguous.
+**Bill Pay** is a full-stack Accounts Payable (AP) web application for small
+businesses (5–50 employees). It replaces the common "spreadsheet + email
+thread" AP workflow with a single system of record that captures vendor
+payment details, routes bills through a configurable approval rules engine,
+and settles payments across ACH, check, wire, and card rails — all with a
+complete, tamper-proof audit trail.
+
+> The authoritative specification lives at
+> [`docs/specs/bill-pay-mvp.md`](./docs/specs/bill-pay-mvp.md). This README
+> is the reviewer's quick-start guide; the spec is the source of truth for
+> anything that feels ambiguous.
+
+**Key capabilities at a glance:**
+- Vendor directory with ACH / check / wire / card payment details
+- Draft → submit → approve → pay bill lifecycle with enforced state machine
+- Configurable amount-threshold approval rules engine with live preview
+- Mock payment execution across all four rails with idempotency support
+- Payables dashboard: status totals, overdue list, next-7-days upcoming
+- Full audit trail on every bill event (created, submitted, approved, paid, …)
 
 ## What this product does
 
@@ -85,41 +97,37 @@ prioritized against the 4-hour challenge budget.
 
 Behavioral boundaries (§4.6) extend these choices at runtime: payments never
 move money, rule edits never re-evaluate in-flight bills, vendor deletes
-never cascade, there is no login / session / multi-tenancy.
+never cascade, and authentication is intentionally minimal — email + password
+login with opaque server-side sessions (§6.9), no OAuth/SSO/MFA/password-reset.
 
-## Setup
+## Getting started
 
-Primary path, reviewer side (§4.5 O-1):
+### Docker (recommended)
+
+Prerequisites: Docker + Docker Compose, with host ports `3000`, `4000`, `5432`
+free (override via `.env` — see below).
 
 ```bash
-cp .env.example .env   # defaults work as-is
-make up                # == docker compose up --build
+# 1. Copy environment config — defaults work as-is
+cp .env.example .env
+
+# 2. Build and start all services (API, web, Postgres)
+make up
 ```
 
-Then open:
-
-- Web:    http://localhost:3000
-- API:    http://localhost:4000
-- Health: http://localhost:4000/health
-
-On first start, the `api` container waits for Postgres, runs
+On first start the `api` container waits for Postgres, runs
 `prisma migrate deploy`, and — if `SEED_ON_EMPTY=true` and the DB is empty —
 seeds demo data. Subsequent `make up` runs preserve your data.
 
-**Prerequisites**
+Open:
 
-- Docker + Docker Compose, with host ports `3000`, `4000`, `5432` free
-  (override via `.env` — see below).
-- Or, for non-Docker development: Node 20, pnpm 9 (via corepack), and a
-  local Postgres 16 reachable via `DATABASE_URL`, then `pnpm install && pnpm dev`.
+| Service | URL |
+|---|---|
+| Web app | http://localhost:3000 |
+| API     | http://localhost:4000 |
+| Health  | http://localhost:4000/health |
 
-**Port overrides** (useful when the defaults collide with other dev services):
-
-```bash
-API_PORT=4001 WEB_PORT=3001 make up
-```
-
-**Useful Makefile targets** (§6.1.4):
+**Useful Makefile targets:**
 
 | Target | Effect |
 |---|---|
@@ -129,6 +137,52 @@ API_PORT=4001 WEB_PORT=3001 make up
 | `make seed`  | runs `pnpm db:seed` inside the api container |
 | `make logs`  | tails compose logs |
 
+**Port overrides** (useful when defaults collide with other dev services):
+
+```bash
+API_PORT=4001 WEB_PORT=3001 make up
+```
+
+### Local development (without Docker)
+
+Prerequisites: Node 20, pnpm 9, Postgres 16.
+
+```bash
+# 0. Enable corepack (ships with Node 20 — activates pnpm)
+corepack enable
+
+# 1. Install dependencies
+pnpm install
+
+# 2. Configure environment
+cp .env.example .env
+# Edit .env and set DATABASE_URL to your local Postgres instance, e.g.:
+# DATABASE_URL=postgresql://postgres:postgres@localhost:5432/billpay
+
+# 3. Run database migrations and seed demo data
+pnpm db:migrate
+pnpm db:seed
+
+# 4. Start API and web in watch mode (hot reload)
+pnpm dev
+```
+
+The API starts on `http://localhost:4000` and the web app on
+`http://localhost:3000` by default.
+
+### Running checks
+
+```bash
+# Type-check all packages
+pnpm typecheck
+
+# Lint all packages
+pnpm lint
+
+# Reset the database and reseed (destructive — wipes all data)
+pnpm db:reset
+```
+
 **Environment variables** (all documented in `.env.example`): `DATABASE_URL`,
 `API_PORT`, `WEB_PORT`, `UPLOAD_DIR`, `VITE_API_URL`, `SEED_ON_EMPTY`.
 
@@ -136,23 +190,162 @@ API_PORT=4001 WEB_PORT=3001 make up
 9 vendors, 20 bills, 3 attachments — enough to demo every §4.3 step without
 creating data first. See §6.8 for the seed strategy.
 
+## API examples
+
+Every endpoint except `GET /health` and `POST /auth/login` requires
+`Authorization: Bearer <token>` where the token is obtained from
+`POST /auth/login` and resolves to a server-side `Session` row (§6.9). Errors
+follow [RFC 7807](https://datatracker.ietf.org/doc/html/rfc7807) with a stable
+`code` field.
+
+**Log in (mint a session token)**
+```bash
+curl -X POST http://localhost:4000/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"alice@acmewidgets.demo","password":"demo1234"}'
+```
+```json
+{
+  "token": "f8785bd2…b57d",
+  "expires_at": "2026-05-06T11:48:14.858Z",
+  "user": { "id": "user_alice", "name": "Alice Submitter", "role": "submitter", … },
+  "impersonated_user": null
+}
+```
+
+For brevity the examples below assume `TOKEN=$(…)` extracted from the login
+response.
+
+**List all vendors**
+```bash
+curl http://localhost:4000/vendors -H "Authorization: Bearer $TOKEN"
+```
+```json
+[
+  {
+    "id": "clx…",
+    "name": "Acme Corp",
+    "contact_email": "ap@acme.example",
+    "payment_method": "ach",
+    "payment_details": { "method": "ach", "routing_number": "021000021", "account_number": "123456789", "account_holder_name": "Acme Corp" },
+    "is_active": true
+  }
+]
+```
+
+**Create a vendor (ACH)**
+```bash
+curl -X POST http://localhost:4000/vendors \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{
+    "name": "Riverside Supplies",
+    "contact_email": "ar@riverside.example",
+    "payment_method": "ach",
+    "payment_details": {
+      "method": "ach",
+      "routing_number": "021000021",
+      "account_number": "987654321",
+      "account_holder_name": "Riverside Supplies LLC"
+    }
+  }'
+```
+```json
+{ "id": "clx…", "name": "Riverside Supplies", "payment_method": "ach", "is_active": true, … }
+```
+
+**Create a bill (draft)**
+```bash
+curl -X POST http://localhost:4000/bills \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{
+    "vendor_id": "<vendor-id>",
+    "invoice_number": "INV-2024-001",
+    "amount_cents": 120000,
+    "issue_date": "2024-05-01",
+    "due_date": "2024-05-31",
+    "line_items": [
+      { "description": "Consulting services", "amount_cents": 120000 }
+    ]
+  }'
+```
+```json
+{ "id": "clx…", "status": "draft", "amount_cents": 120000, … }
+```
+
+**Submit a bill for approval**
+```bash
+curl -X POST http://localhost:4000/bills/<bill-id>/submit \
+  -H "Authorization: Bearer $TOKEN"
+```
+```json
+{ "id": "clx…", "status": "pending_approval", "approvals": [ … ], … }
+```
+
+**Admin "login as another user" (impersonation)**
+```bash
+curl -X POST http://localhost:4000/auth/impersonate/user_alice \
+  -H "Authorization: Bearer $ADMIN_TOKEN"
+```
+The same session row is mutated in place; subsequent requests carry the
+admin's session token but resolve `req.user` to the impersonated identity.
+Stop with `POST /auth/stop-impersonating`. Audit events written during
+impersonation include `impersonated_by_user_id` in their payload (§6.9.4).
+
+**Validation error response (example)**
+```json
+{
+  "status": 400,
+  "code": "VALIDATION_ERROR",
+  "title": "Invalid request body",
+  "detail": "One or more fields failed validation. See field_issues.",
+  "field_issues": [
+    { "path": "amount_cents", "message": "Number must be greater than 0" }
+  ]
+}
+```
+
+**Illegal state-transition error (example)**
+```json
+{
+  "status": 409,
+  "code": "ILLEGAL_TRANSITION",
+  "title": "Illegal state transition",
+  "detail": "Cannot submit a bill in status 'paid'."
+}
+```
+
 ## Demo users (seeded)
 
-Switch users via the top-right **user switcher** in the header. There is no
-login; the selected user ID is sent as an `X-User-Id` header on every API
-call (§6.1.6 — local only; any deployed build would remove it).
+Sign in at `/login` with any of the seeded accounts below. **All four share
+the password `demo1234`** — the login screen lists them as click-to-fill
+shortcuts (§6.9). Sessions are stored as opaque bearer tokens in
+`localStorage` and revoked on logout / deactivation.
 
-| Name | Role | Approval limit |
+| Email | Role | Approval limit |
 |---|---|---|
-| Alice Submitter   | `submitter` | $0 |
-| Bob Approver-L1   | `approver`  | $10,000 |
-| Carol Approver-L2 | `approver`  | $100,000 |
-| Dana Admin        | `admin`     | $0 (override applies) |
+| `alice@acmewidgets.demo` | `submitter` | $0 |
+| `bob@acmewidgets.demo`   | `approver`  | $10,000 |
+| `carol@acmewidgets.demo` | `approver`  | $100,000 |
+| `dana@acmewidgets.demo`  | `admin`     | $0 (override applies) |
 
 Each user exercises a different authorization path: Alice can draft and
 submit but not approve; Bob clears small bills but is blocked above $10k;
 Carol clears large bills; Dana (admin) can approve and pay anything
 regardless of limit or rule membership (§6.3.4.1).
+
+**Admin "login as another user"** — when signed in as Dana, the header shows a
+**Login as another user** dropdown that swaps the acting identity to any
+non-admin, non-self, active user via `POST /auth/impersonate/:userId`. A
+yellow banner stays visible until the admin clicks "Stop impersonating". Bill
+events created during impersonation record both the acting user and the real
+admin in `BillEvent.payload.impersonated_by_user_id` (§6.9.4).
+
+**Admin user management** — Dana also sees a **Users** entry in the sidebar:
+list, create, edit role/limit, change password, deactivate / reactivate. The
+self-edit surface for non-admins is restricted to name, email, and password —
+role, limit, and `is_active` cannot be self-modified (§6.9.3).
 
 ## Architecture & data model
 
@@ -179,8 +372,11 @@ date-fns — no new runtime deps beyond that list.
   later rule renames / vendor edits never rewrite history.
 - **RFC 7807 error envelopes** with stable `code` values
   (`DEFAULT_RULE_REQUIRED`, `NOT_ELIGIBLE_APPROVER`, `INVALID_TRANSITION`, …)
-  the UI maps to toasts and inline errors.
-- **Local-only `X-User-Id` header auth** (§6.1.6) — no login, no JWT.
+  that the UI maps to toasts and inline errors.
+- **Email + bcrypt password auth with opaque server-side sessions** (§6.9) —
+  `Authorization: Bearer <token>` on every authenticated request. Admin-only
+  user CRUD; admin "login as another user" impersonation with audit-log
+  attribution. No JWT, no OAuth, no MFA, no password-reset.
 
 **Data model** — nine entities (§6.2.1): `User`, `Vendor`, `Bill`,
 `BillLineItem`, `Attachment`, `ApprovalRule`, `BillApproval`, `Payment`,
@@ -188,13 +384,29 @@ date-fns — no new runtime deps beyond that list.
 union, and the deletion / referential-integrity matrix are in §6.2.
 
 **Approval engine highlights** (§6.4): every active rule with
-`min_amount_cents <= bill.amount_cents` matches and all matches must be
+`min_amount_cents <= bill.amount_cents` matches, and all matches must be
 satisfied; regular approvers must have `max_approval_amount_cents >=
 bill.amount_cents`; active admins are unioned into every snapshot
 unconditionally (§6.3.4.1 override); the **default-rule invariant (V6)**
 rejects any mutation that would leave zero active `min_amount_cents = 0`
 rules; rule edits never re-evaluate in-flight bills (§4.6) — snapshots
 are immutable.
+
+**Worked example** — suppose two active rules exist:
+
+| Rule | Threshold | Approvers |
+|---|---|---|
+| Any purchase | `min_amount_cents = 0` | Bob ($10k limit), Carol ($100k limit) |
+| Large purchase | `min_amount_cents = 1_000_000` | Carol ($100k limit) |
+
+Alice submits a `$15,000` bill:
+- Both rules match (`0 ≤ 15,000` and `10,000 ≤ 15,000`).
+- Rule 1 snapshot: Carol eligible (Bob's $10k limit is below the bill amount).
+- Rule 2 snapshot: Carol eligible.
+- Both `BillApproval` rows must reach `approved` before the bill advances.
+- Carol approves once → her click settles both slots atomically → bill → `approved`.
+- Bob's "Approve" button is disabled with "Your limit is $10,000; bill is $15,000".
+- Dana (admin) could also approve either slot regardless of limit or rule membership.
 
 ### Demo walkthrough
 
