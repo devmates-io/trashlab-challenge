@@ -11,6 +11,7 @@
 
 import { PrismaClient, type User } from "@prisma/client";
 import type { Prisma } from "@prisma/client";
+import bcrypt from "bcrypt";
 import { addDays, subDays } from "date-fns";
 import { copyFileSync, mkdirSync, statSync } from "node:fs";
 import { randomBytes } from "node:crypto";
@@ -101,13 +102,21 @@ async function main() {
   // -------------------------------------------------------------------------
   // §6.8.2 — Users. Deterministic IDs so the §4.3 / §6.4.8 walkthroughs
   // reference the same rows across restarts.
+  //
+  // All four demo users share the plaintext password `demo1234` for the
+  // walkthrough flows. Hashed once with bcrypt cost 10 and reused — the
+  // plaintext is identical, so the hash is interchangeable and we save three
+  // ~80ms bcrypt rounds at seed time.
   // -------------------------------------------------------------------------
+  const demoPasswordHash = await bcrypt.hash("demo1234", 10);
+
   await prisma.user.createMany({
     data: [
       {
         id: "user_alice",
         name: "Alice Submitter",
         email: "alice@acmewidgets.demo",
+        passwordHash: demoPasswordHash,
         role: "submitter",
         maxApprovalAmountCents: 0,
         isActive: true,
@@ -116,6 +125,7 @@ async function main() {
         id: "user_bob",
         name: "Bob Approver-L1",
         email: "bob@acmewidgets.demo",
+        passwordHash: demoPasswordHash,
         role: "approver",
         maxApprovalAmountCents: 1_000_000,
         isActive: true,
@@ -124,6 +134,7 @@ async function main() {
         id: "user_carol",
         name: "Carol Approver-L2",
         email: "carol@acmewidgets.demo",
+        passwordHash: demoPasswordHash,
         role: "approver",
         maxApprovalAmountCents: 10_000_000,
         isActive: true,
@@ -132,6 +143,7 @@ async function main() {
         id: "user_dana",
         name: "Dana Admin",
         email: "dana@acmewidgets.demo",
+        passwordHash: demoPasswordHash,
         role: "admin",
         maxApprovalAmountCents: 0,
         isActive: true,
