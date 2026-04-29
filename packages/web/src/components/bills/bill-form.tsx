@@ -4,10 +4,12 @@ import { useFieldArray, useForm, type SubmitHandler } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { toast } from "sonner";
-import { Loader2, Plus, Trash2, X } from "lucide-react";
+import { Loader2, Plus, Sparkles, Trash2, X } from "lucide-react";
 import type {
   BillCreateRequest,
+  BillExtractResponse,
   BillPatchRequest,
+  PossibleDuplicateMatch,
   VendorDTO,
 } from "@bill-pay/shared";
 
@@ -27,6 +29,7 @@ import { cn } from "@/lib/utils";
 import {
   useCreateBill,
   useDeleteBill,
+  useExtractInvoice,
   useSubmitBillById,
   useUpdateBill,
   useUploadAttachment,
@@ -36,6 +39,7 @@ import {
 import { useVendorsList } from "@/hooks/use-vendors";
 import { DateField } from "@/components/bills/date-field";
 import { DeleteDraftModal } from "@/components/bills/delete-draft-modal";
+import { DuplicateBillDialog } from "@/components/bills/duplicate-bill-dialog";
 
 // ---------------------------------------------------------------------------
 // Form-local zod schema. Money is handled as dollar strings in the form and
@@ -166,12 +170,20 @@ function AttachmentInput({
   initial,
   value,
   onChange,
+  onExtract,
   disabled,
+  isExtracting,
 }: {
   initial: BillDetailDTO["attachment"] | null | undefined;
   value: string | null | undefined;
   onChange: (id: string | null) => void;
+  // §6.10.1 — invoked when the user clicks "Extract from invoice". The
+  // parent form runs the LLM call and applies the suggested fields. Passing
+  // the attachment id (not the file) means the server reads from disk and
+  // every extraction is idempotent against the same upload.
+  onExtract: (attachmentId: string) => void;
   disabled?: boolean;
+  isExtracting: boolean;
 }) {
   const upload = useUploadAttachment();
   const [uploaded, setUploaded] = React.useState<UploadedState | null>(() => {
@@ -217,24 +229,43 @@ function AttachmentInput({
 
   if (uploaded) {
     return (
-      <div className="flex items-center justify-between gap-3 rounded-md border bg-muted/30 p-3">
-        <div className="min-w-0">
-          <p className="truncate text-sm font-medium">
-            {uploaded.original_filename}
-          </p>
-          <p className="text-xs text-muted-foreground">
-            {uploaded.mime_type} · {(uploaded.size_bytes / 1024).toFixed(0)} KB
-          </p>
+      <div className="space-y-2">
+        <div className="flex items-center justify-between gap-3 rounded-md border bg-muted/30 p-3">
+          <div className="min-w-0">
+            <p className="truncate text-sm font-medium">
+              {uploaded.original_filename}
+            </p>
+            <p className="text-xs text-muted-foreground">
+              {uploaded.mime_type} · {(uploaded.size_bytes / 1024).toFixed(0)} KB
+            </p>
+          </div>
+          <div className="flex items-center gap-1">
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={() => onExtract(uploaded.attachment_id)}
+              disabled={disabled || isExtracting}
+              title="Use AI to extract the invoice fields automatically"
+            >
+              {isExtracting ? (
+                <Loader2 className="mr-1 h-4 w-4 animate-spin" />
+              ) : (
+                <Sparkles className="mr-1 h-4 w-4" />
+              )}
+              {isExtracting ? "Extracting…" : "Extract from invoice"}
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              onClick={clear}
+              disabled={disabled}
+            >
+              <X className="mr-1 h-4 w-4" /> Remove
+            </Button>
+          </div>
         </div>
-        <Button
-          type="button"
-          size="sm"
-          variant="ghost"
-          onClick={clear}
-          disabled={disabled}
-        >
-          <X className="mr-1 h-4 w-4" /> Remove
-        </Button>
       </div>
     );
   }
@@ -252,7 +283,9 @@ function AttachmentInput({
         }}
       />
       <p className="text-xs text-muted-foreground">
-        PDF, PNG, or JPEG. Max 10 MB.
+        PDF, PNG, or JPEG. Max 10 MB. After uploading, click{" "}
+        <span className="font-medium">Extract from invoice</span> to auto-fill
+        the form.
       </p>
       {upload.isPending && (
         <p className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -284,6 +317,7 @@ export function BillForm({
   const updateBill = useUpdateBill(initial?.id ?? "");
   const submitBill = useSubmitBillById();
   const deleteBill = useDeleteBill();
+  const extractInvoice = useExtractInvoice();
 
   const form = useForm<BillFormValues>({
     resolver: zodResolver(billFormSchema),
@@ -344,55 +378,113 @@ export function BillForm({
     return true;
   }
 
-  const onSaveDraft: SubmitHandler<BillFormValues> = async (values) => {
-    const body = toRequest(values);
+  // §6.10.3 — duplicate-confirmation state. When a save call returns 409
+  // POSSIBLE_DUPLICATE, we stash the request body and the user's intent
+  // ("save and submit" vs "save draft") so a confirm-anyway click can
+  // replay the exact same flow with `force=true`.
+  type PendingSave = {
+    body: BillCreateRequest;
+    submitAfter: boolean;
+  };
+  const [duplicateState, setDuplicateState] = React.useState<{
+    matches: PossibleDuplicateMatch[];
+    pending: PendingSave;
+  } | null>(null);
+
+  // Pulls the `matches` array out of the 409 problem document. Returns
+  // null when the error isn't a duplicate signal.
+  function extractDuplicateMatches(err: unknown): PossibleDuplicateMatch[] | null {
+    if (!(err instanceof ApiError) || err.code !== "POSSIBLE_DUPLICATE") {
+      return null;
+    }
+    const raw = err.body?.matches;
+    if (!Array.isArray(raw)) return null;
+    return raw as PossibleDuplicateMatch[];
+  }
+
+  // Shared post-save flow: optionally chain a /submit, navigate, toast.
+  async function afterCreate(billId: string, submitAfter: boolean) {
+    if (submitAfter) {
+      await submitBill.mutateAsync(billId);
+      toast.success("Bill submitted for approval.");
+    } else {
+      toast.success("Draft saved.");
+    }
+    navigate(`/bills/${billId}`);
+  }
+
+  async function performCreate(body: BillCreateRequest, submitAfter: boolean, force = false) {
     try {
-      if (mode === "create") {
-        const bill = await createBill.mutateAsync(body);
-        toast.success("Draft saved.");
-        navigate(`/bills/${bill.id}`);
-      } else if (initial) {
-        await updateBill.mutateAsync(body as BillPatchRequest);
-        toast.success("Draft saved.");
-        navigate(`/bills/${initial.id}`);
-      }
+      const bill = await createBill.mutateAsync({ body, force });
+      await afterCreate(bill.id, submitAfter);
     } catch (err) {
+      const dupes = extractDuplicateMatches(err);
+      if (dupes && dupes.length > 0) {
+        setDuplicateState({ matches: dupes, pending: { body, submitAfter } });
+        return;
+      }
       if (!applyApiFieldIssues(err)) {
         const msg =
           err instanceof ApiError
             ? err.detail
-            : "Failed to save draft.";
+            : submitAfter
+              ? "Failed to save and submit."
+              : "Failed to save draft.";
         toast.error(msg, { duration: Infinity });
       }
     }
-  };
+  }
 
-  const onSaveAndSubmit: SubmitHandler<BillFormValues> = async (values) => {
-    const body = toRequest(values);
+  async function performEdit(billId: string, body: BillPatchRequest, submitAfter: boolean) {
     try {
-      let billId: string;
-      if (mode === "create") {
-        const bill = await createBill.mutateAsync(body);
-        billId = bill.id;
-      } else if (initial) {
-        const bill = await updateBill.mutateAsync(body as BillPatchRequest);
-        billId = bill.id;
+      await updateBill.mutateAsync(body);
+      if (submitAfter) {
+        await submitBill.mutateAsync(billId);
+        toast.success("Bill submitted for approval.");
       } else {
-        return;
+        toast.success("Draft saved.");
       }
-      await submitBill.mutateAsync(billId);
-      toast.success("Bill submitted for approval.");
       navigate(`/bills/${billId}`);
     } catch (err) {
       if (!applyApiFieldIssues(err)) {
         const msg =
           err instanceof ApiError
             ? err.detail
-            : "Failed to save and submit.";
+            : submitAfter
+              ? "Failed to save and submit."
+              : "Failed to save draft.";
         toast.error(msg, { duration: Infinity });
       }
     }
+  }
+
+  const onSaveDraft: SubmitHandler<BillFormValues> = async (values) => {
+    const body = toRequest(values);
+    if (mode === "create") {
+      await performCreate(body, false);
+    } else if (initial) {
+      await performEdit(initial.id, body as BillPatchRequest, false);
+    }
   };
+
+  const onSaveAndSubmit: SubmitHandler<BillFormValues> = async (values) => {
+    const body = toRequest(values);
+    if (mode === "create") {
+      await performCreate(body, true);
+    } else if (initial) {
+      await performEdit(initial.id, body as BillPatchRequest, true);
+    }
+  };
+
+  // Replay the original create with `force=true` after the user confirms
+  // they want to create despite duplicates. We close the dialog optimistically
+  // — if the second call fails, the inline toast surface fires.
+  async function confirmDuplicateAnyway() {
+    if (!duplicateState) return;
+    const pending = duplicateState.pending;
+    setDuplicateState(null);
+    await performCreate(pending.body, pending.submitAfter, true);
+  }
 
   const [deleteOpen, setDeleteOpen] = React.useState(false);
 
@@ -400,6 +492,108 @@ export function BillForm({
     const list = vendorsQuery.data ?? [];
     return list.filter((v) => v.is_active);
   }, [vendorsQuery.data]);
+
+  // §6.10.1 — apply extracted fields to the form. Each field is treated as a
+  // suggestion: we overwrite the current value but keep the field editable.
+  // `vendor_name` is matched against the active vendor list by exact name
+  // (case-insensitive). If no match, we surface the name in a toast so the
+  // user can pick a vendor or create one. Only fields the model returned
+  // are touched — undefined extractions never clobber form state.
+  const applyExtraction = React.useCallback(
+    (extraction: BillExtractResponse) => {
+      let appliedCount = 0;
+      const filledFields: string[] = [];
+
+      if (extraction.vendor_name) {
+        const target = extraction.vendor_name.toLowerCase().trim();
+        const match = vendors.find((v) => v.name.toLowerCase().trim() === target);
+        if (match) {
+          setValue("vendor_id", match.id, { shouldValidate: true, shouldDirty: true });
+          appliedCount++;
+          filledFields.push("vendor");
+        } else {
+          toast.info(
+            `Vendor "${extraction.vendor_name}" not found. Pick one or create it first.`,
+          );
+        }
+      }
+      if (extraction.invoice_number) {
+        setValue("invoice_number", extraction.invoice_number, {
+          shouldDirty: true,
+          shouldValidate: true,
+        });
+        appliedCount++;
+        filledFields.push("invoice number");
+      }
+      if (extraction.issue_date) {
+        setValue("issue_date", extraction.issue_date, {
+          shouldDirty: true,
+          shouldValidate: true,
+        });
+        appliedCount++;
+        filledFields.push("issue date");
+      }
+      if (extraction.due_date) {
+        setValue("due_date", extraction.due_date, {
+          shouldDirty: true,
+          shouldValidate: true,
+        });
+        appliedCount++;
+        filledFields.push("due date");
+      }
+      if (extraction.line_items && extraction.line_items.length > 0) {
+        const dollars = extraction.line_items.map((li) => ({
+          description: li.description,
+          amount_dollars: centsToDollars(li.amount_cents),
+        }));
+        setValue("line_items", dollars, {
+          shouldDirty: true,
+          shouldValidate: true,
+        });
+        refreshLineItemsSum();
+        appliedCount++;
+        filledFields.push(`${dollars.length} line item${dollars.length === 1 ? "" : "s"}`);
+      }
+
+      if (extraction.source === "stub") {
+        toast.warning(
+          "Stub extraction — set ANTHROPIC_API_KEY in .env to enable real OCR.",
+          { duration: 8000 },
+        );
+        return;
+      }
+
+      if (appliedCount === 0) {
+        toast.info("No fields were extracted from this invoice.");
+        return;
+      }
+
+      const conf = extraction.confidence;
+      const confSuffix =
+        typeof conf === "number" ? ` (${Math.round(conf * 100)}% confidence)` : "";
+      toast.success(`Extracted ${filledFields.join(", ")}${confSuffix}.`);
+    },
+    [vendors, setValue, refreshLineItemsSum],
+  );
+
+  const handleExtract = React.useCallback(
+    (attachmentId: string) => {
+      extractInvoice.mutate(
+        { attachment_id: attachmentId },
+        {
+          onSuccess: applyExtraction,
+          onError: (err) => {
+            const msg =
+              err instanceof ApiError
+                ? err.detail
+                : "Could not extract fields from this invoice.";
+            toast.error(msg);
+          },
+        },
+      );
+    },
+    [extractInvoice, applyExtraction],
+  );
 
   const isBusy =
     isSubmitting ||
@@ -631,6 +825,8 @@ export function BillForm({
             onChange={(id) =>
               setValue("attachment_id", id, { shouldDirty: true })
             }
+            onExtract={handleExtract}
+            isExtracting={extractInvoice.isPending}
             disabled={isBusy}
           />
         </div>
@@ -705,6 +901,14 @@ export function BillForm({
           }}
         />
       )}
+
+      <DuplicateBillDialog
+        open={duplicateState !== null}
+        matches={duplicateState?.matches ?? []}
+        onCancel={() => setDuplicateState(null)}
+        onConfirm={confirmDuplicateAnyway}
+        isConfirming={createBill.isPending}
+      />
     </form>
   );
 }

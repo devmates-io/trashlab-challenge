@@ -54,6 +54,10 @@ export class ApiError extends Error {
   public readonly fieldIssues: FieldIssue[];
   public readonly type?: string;
   public readonly instance?: string;
+  // The raw RFC 7807 problem document body. Feature-specific error codes
+  // (e.g. POSSIBLE_DUPLICATE carries a `matches` array) can pull their
+  // custom fields off this without us having to enumerate them in ApiError.
+  public readonly body?: Record<string, unknown>;
 
   constructor(opts: {
     code: string;
@@ -62,6 +66,7 @@ export class ApiError extends Error {
     fieldIssues?: FieldIssue[];
     type?: string;
     instance?: string;
+    body?: Record<string, unknown>;
   }) {
     super(opts.detail);
     this.name = "ApiError";
@@ -71,6 +76,7 @@ export class ApiError extends Error {
     this.fieldIssues = opts.fieldIssues ?? [];
     this.type = opts.type;
     this.instance = opts.instance;
+    this.body = opts.body;
   }
 }
 
@@ -126,7 +132,7 @@ export async function apiFetch<T = unknown>(
       contentType.includes("application/json")
     ) {
       const payload = (await res.json().catch(() => null)) as
-        | {
+        | (Record<string, unknown> & {
             code?: string;
             status?: number;
             detail?: string;
@@ -134,7 +140,7 @@ export async function apiFetch<T = unknown>(
             field_issues?: FieldIssue[];
             type?: string;
             instance?: string;
-          }
+          })
         | null;
       const code = payload?.code ?? "UNKNOWN_ERROR";
       const status = payload?.status ?? res.status;
@@ -146,6 +152,7 @@ export async function apiFetch<T = unknown>(
         fieldIssues: payload?.field_issues,
         type: payload?.type,
         instance: payload?.instance,
+        body: payload ?? undefined,
       });
     }
     clearTokenOnAuthFailure(res.status, "UNKNOWN_ERROR");

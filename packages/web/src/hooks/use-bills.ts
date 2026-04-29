@@ -9,9 +9,13 @@ import type {
   ApprovalStatus,
   BillCreateRequest,
   BillEventType,
+  BillExtractRequest,
+  BillExtractResponse,
   BillLineItemDTO,
   BillPatchRequest,
   BillStatus,
+  BulkBillsRequest,
+  BulkBillsResponse,
   PaymentDTO,
   VendorDTO,
 } from "@bill-pay/shared";
@@ -126,15 +130,27 @@ export function useBill(id: string | undefined): UseQueryResult<BillDetailDTO> {
 // Mutations — §6.5.4
 // ---------------------------------------------------------------------------
 
+// §6.10.3 — variables type accepts an optional `force` flag that maps to
+// the server's `?force=true` duplicate-bypass query param. Default
+// behavior (force=false / undefined) runs the duplicate check and returns
+// 409 POSSIBLE_DUPLICATE when matches exist.
+export interface CreateBillVars {
+  body: BillCreateRequest;
+  force?: boolean;
+}
+
 export function useCreateBill(): UseMutationResult<
   BillDetailDTO,
   unknown,
-  BillCreateRequest
+  CreateBillVars
 > {
   const qc = useQueryClient();
-  return useMutation<BillDetailDTO, unknown, BillCreateRequest>({
-    mutationFn: (body) =>
-      apiFetch<BillDetailDTO>("/bills", { method: "POST", body }),
+  return useMutation<BillDetailDTO, unknown, CreateBillVars>({
+    mutationFn: ({ body, force }) =>
+      apiFetch<BillDetailDTO>(force ? "/bills?force=true" : "/bills", {
+        method: "POST",
+        body,
+      }),
     onSuccess: (bill) => {
       qc.setQueryData(billDetailKey(bill.id), bill);
       invalidateBillScoped(qc);
@@ -302,6 +318,49 @@ export function useUploadAttachment(): UseMutationResult<
       });
     },
   });
+}
+
+// §6.10.1 — POST /bills/extract. Server runs Claude over the uploaded file
+// and returns suggested fields. The mutation is intentionally not cached
+// (no react-query key) — every invocation is a fresh extraction request.
+export function useExtractInvoice(): UseMutationResult<
+  BillExtractResponse,
+  unknown,
+  BillExtractRequest
+> {
+  return useMutation<BillExtractResponse, unknown, BillExtractRequest>({
+    mutationFn: (body) =>
+      apiFetch<BillExtractResponse>("/bills/extract", {
+        method: "POST",
+        body,
+      }),
+  });
+}
+
+// §6.10.2 — bulk approve / bulk pay. Both endpoints share the same wire
+// shape so we share a generic hook factory; success invalidation is the
+// same too (every visible list of bills must re-fetch). Per-bill outcomes
+// live in the `results` array — the caller decides how to surface them.
+function useBulkBillsAction(
+  pathname: "/bills/bulk-approve" | "/bills/bulk-pay",
+): UseMutationResult<BulkBillsResponse, unknown, BulkBillsRequest> {
+  const qc = useQueryClient();
+  return useMutation<BulkBillsResponse, unknown, BulkBillsRequest>({
+    mutationFn: (body) =>
+      apiFetch<BulkBillsResponse>(pathname, { method: "POST", body }),
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: BILLS_LIST_KEY });
+      qc.invalidateQueries({ queryKey: DASHBOARD_KEY });
+    },
+  });
+}
+
+export function useBulkApproveBills() {
+  return useBulkBillsAction("/bills/bulk-approve");
+}
+
+export function useBulkPayBills() {
+  return useBulkBillsAction("/bills/bulk-pay");
 }
 
 // ---------------------------------------------------------------------------

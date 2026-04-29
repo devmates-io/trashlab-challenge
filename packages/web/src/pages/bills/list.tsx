@@ -1,8 +1,10 @@
 import * as React from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
-import { Plus } from "lucide-react";
+import { CheckCheck, CreditCard, Loader2, Plus, X } from "lucide-react";
+import { toast } from "sonner";
 import type { BillStatus } from "@bill-pay/shared";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 import {
   Table,
@@ -17,7 +19,12 @@ import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
 import { formatDate, formatMoney } from "@/lib/format";
 import { ApiError } from "@/lib/api";
-import { useBills, type BillSummaryDTO } from "@/hooks/use-bills";
+import {
+  useBills,
+  useBulkApproveBills,
+  useBulkPayBills,
+  type BillSummaryDTO,
+} from "@/hooks/use-bills";
 import { BillStatusBadge } from "@/components/bills/status-badge";
 
 // Status filter bar — §6.6.4. "All" clears the filter.
@@ -84,7 +91,7 @@ function TableLoading({ rows = 5 }: { rows?: number }) {
     <TableBody>
       {Array.from({ length: rows }).map((_, i) => (
         <TableRow key={i}>
-          {Array.from({ length: 6 }).map((__, j) => (
+          {Array.from({ length: 7 }).map((__, j) => (
             <TableCell key={j}>
               <Skeleton className="h-4 w-full" />
             </TableCell>
@@ -95,6 +102,20 @@ function TableLoading({ rows = 5 }: { rows?: number }) {
   );
 }
 
+// §6.10.2 — bulk eligibility predicates. A bill must be in `pending_approval`
+// to be approvable, and `approved` to be payable. The selection model only
+// needs *one* of these to be uniformly true across the selection — we
+// surface "Approve N" or "Pay N" buttons individually based on whether
+// every selected bill is eligible for that action. This avoids the messy
+// "approve some, fail others" UX without forcing the user to deselect by
+// hand.
+function selectableForApproval(b: BillSummaryDTO): boolean {
+  return b.status === "pending_approval";
+}
+function selectableForPayment(b: BillSummaryDTO): boolean {
+  return b.status === "approved";
+}
+
 export default function BillsListPage(): React.ReactElement {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -102,6 +123,8 @@ export default function BillsListPage(): React.ReactElement {
   const overdueOnly = parseOverdue(searchParams.get("overdue"));
 
   const billsQuery = useBills(status ?? undefined);
+  const bulkApprove = useBulkApproveBills();
+  const bulkPay = useBulkPayBills();
 
   function setStatus(next: BillStatus | null) {
     const sp = new URLSearchParams(searchParams);
@@ -125,6 +148,118 @@ export default function BillsListPage(): React.ReactElement {
 
   const totalBills = billsQuery.data?.length ?? 0;
   const error = billsQuery.error as ApiError | null | undefined;
+
+  // §6.10.2 — bulk selection. The selection set lives entirely in URL-less
+  // local state (resets on filter change so the user can't pile up a
+  // selection across status filters that include both pending_approval
+  // and approved bills, which would make the action eligibility ambiguous).
+  const [selectedIds, setSelectedIds] = React.useState<Set<string>>(
+    () => new Set(),
+  );
+  React.useEffect(() => {
+    setSelectedIds(new Set());
+  }, [status, overdueOnly]);
+
+  const visibleIds = React.useMemo(() => rows.map((r) => r.id), [rows]);
+  const selectableRows = React.useMemo(
+    () =>
+      rows.filter(
+        (r) => selectableForApproval(r) || selectableForPayment(r),
+      ),
+    [rows],
+  );
+
+  function toggleOne(id: string, checked: boolean) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (checked) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  }
+
+  function toggleAll(checked: boolean) {
+    if (!checked) {
+      setSelectedIds(new Set());
+      return;
+    }
+    setSelectedIds(new Set(selectableRows.map((r) => r.id)));
+  }
+
+  const selectedRows = rows.filter((r) => selectedIds.has(r.id));
+  const allApprovable =
+    selectedRows.length > 0 && selectedRows.every(selectableForApproval);
+  const allPayable =
+    selectedRows.length > 0 && selectedRows.every(selectableForPayment);
+
+  const isBulkBusy = bulkApprove.isPending || bulkPay.isPending;
+
+  // Single toast policy: aggregate the per-bill result envelope into one
+  // success ("All N succeeded") / mixed ("N succeeded, M failed — first
+  // error: …") / failure ("All N failed: …") summary. Showing a toast per
+  // bill quickly becomes noise on a 20-bill batch.
+  function summarizeBulkResults(
+    op: "Approved" | "Paid",
+    res: { results: { ok: boolean; code?: string; detail?: string }[]; succeeded: number; failed: number },
+  ) {
+    if (res.failed === 0) {
+      toast.success(`${op} ${res.succeeded} bill${res.succeeded === 1 ? "" : "s"}.`);
+      return;
+    }
+    if (res.succeeded === 0) {
+      const first = res.results.find((r) => !r.ok);
+      const detail = first ? ` — ${first.detail ?? first.code ?? "failed"}` : "";
+      toast.error(`Failed to ${op.toLowerCase()} all ${res.failed} bill${res.failed === 1 ? "" : "s"}${detail}.`, {
+        duration: Number.POSITIVE_INFINITY,
+      });
+      return;
+    }
+    const first = res.results.find((r) => !r.ok);
+    const detail = first ? ` — first error: ${first.detail ?? first.code ?? "failed"}` : "";
+    toast.warning(
+      `${op} ${res.succeeded}, ${res.failed} failed${detail}.`,
+      { duration: Number.POSITIVE_INFINITY },
+    );
+  }
+
+  async function handleBulkApprove() {
+    try {
+      const res = await bulkApprove.mutateAsync({
+        bill_ids: Array.from(selectedIds),
+      });
+      summarizeBulkResults("Approved", res);
+      setSelectedIds(new Set());
+    } catch (err) {
+      toast.error(
+        err instanceof ApiError ? err.detail : "Bulk approve failed.",
+        { duration: Number.POSITIVE_INFINITY },
+      );
+    }
+  }
+
+  async function handleBulkPay() {
+    try {
+      const res = await bulkPay.mutateAsync({
+        bill_ids: Array.from(selectedIds),
+      });
+      summarizeBulkResults("Paid", res);
+      setSelectedIds(new Set());
+    } catch (err) {
+      toast.error(
+        err instanceof ApiError ? err.detail : "Bulk pay failed.",
+        { duration: Number.POSITIVE_INFINITY },
+      );
+    }
+  }
+
+  // Header checkbox is "all visible & selectable are selected", with an
+  // indeterminate state when *some* but not *all* are. We only need to
+  // surface checked vs unchecked; aria-checked="mixed" semantics are too
+  // niche for this volume.
+  const allSelectableCount = selectableRows.length;
+  const allSelected =
+    allSelectableCount > 0 &&
+    selectableRows.every((r) => selectedIds.has(r.id));
 
   return (
     <div className="space-y-6">
@@ -189,6 +324,14 @@ export default function BillsListPage(): React.ReactElement {
         <Table>
           <TableHeader>
             <TableRow>
+              <TableHead className="w-10">
+                <Checkbox
+                  aria-label="Select all selectable bills on this page"
+                  checked={allSelected}
+                  disabled={allSelectableCount === 0 || isBulkBusy}
+                  onCheckedChange={(checked) => toggleAll(checked === true)}
+                />
+              </TableHead>
               <TableHead>Vendor</TableHead>
               <TableHead>Invoice</TableHead>
               <TableHead className="text-right">Amount</TableHead>
@@ -203,7 +346,7 @@ export default function BillsListPage(): React.ReactElement {
           ) : rows.length === 0 ? (
             <TableBody>
               <TableRow>
-                <TableCell colSpan={6} className="py-12 text-center">
+                <TableCell colSpan={7} className="py-12 text-center">
                   {totalBills === 0 && !overdueOnly && status == null ? (
                     <div className="space-y-3">
                       <p className="text-muted-foreground">
@@ -251,12 +394,35 @@ export default function BillsListPage(): React.ReactElement {
             <TableBody>
               {rows.map((b) => {
                 const overdue = isOverdue(b, today);
+                const isSelectable =
+                  selectableForApproval(b) || selectableForPayment(b);
+                const isSelected = selectedIds.has(b.id);
                 return (
                   <TableRow
                     key={b.id}
                     onClick={() => navigate(`/bills/${b.id}`)}
                     className="cursor-pointer"
+                    data-state={isSelected ? "selected" : undefined}
                   >
+                    <TableCell
+                      // Stop propagation on the entire cell so the checkbox
+                      // (and its surrounding click target) never trigger
+                      // the row's navigate-to-detail handler.
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <Checkbox
+                        aria-label={
+                          isSelectable
+                            ? `Select bill ${b.invoice_number}`
+                            : `Bill ${b.invoice_number} cannot be selected — only pending or approved bills are eligible`
+                        }
+                        checked={isSelected}
+                        disabled={!isSelectable || isBulkBusy}
+                        onCheckedChange={(checked) =>
+                          toggleOne(b.id, checked === true)
+                        }
+                      />
+                    </TableCell>
                     <TableCell className="font-medium">
                       {b.vendor_name}
                     </TableCell>
@@ -284,6 +450,69 @@ export default function BillsListPage(): React.ReactElement {
           )}
         </Table>
       </div>
+
+      {/* §6.10.2 — sticky bulk action bar. Sits at the bottom of the
+        viewport while a non-empty selection is active. The two action
+        buttons disable themselves unless every row in the selection
+        qualifies for that action (mixed selections show neither). */}
+      {selectedIds.size > 0 && (
+        <div className="pointer-events-none sticky bottom-4 z-20 flex justify-center">
+          <div className="pointer-events-auto flex items-center gap-3 rounded-full border bg-card px-4 py-2 shadow-lg">
+            <span className="text-sm">
+              <span className="font-semibold">{selectedIds.size}</span> selected
+            </span>
+            <span className="h-4 w-px bg-border" />
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={handleBulkApprove}
+              disabled={!allApprovable || isBulkBusy}
+              title={
+                !allApprovable
+                  ? "Select only pending bills to use bulk approve."
+                  : undefined
+              }
+            >
+              {bulkApprove.isPending ? (
+                <Loader2 className="mr-1 h-4 w-4 animate-spin" />
+              ) : (
+                <CheckCheck className="mr-1 h-4 w-4" />
+              )}
+              Approve {selectedIds.size}
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              onClick={handleBulkPay}
+              disabled={!allPayable || isBulkBusy}
+              title={
+                !allPayable
+                  ? "Select only approved bills to use bulk pay."
+                  : undefined
+              }
+            >
+              {bulkPay.isPending ? (
+                <Loader2 className="mr-1 h-4 w-4 animate-spin" />
+              ) : (
+                <CreditCard className="mr-1 h-4 w-4" />
+              )}
+              Pay {selectedIds.size}
+            </Button>
+            <span className="h-4 w-px bg-border" />
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              onClick={() => setSelectedIds(new Set())}
+              disabled={isBulkBusy}
+              aria-label="Clear selection"
+            >
+              <X className="h-4 w-4" />
+            </Button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
